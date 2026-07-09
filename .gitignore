@@ -1,0 +1,8 @@
+node_modules/
+config.json
+batch-accounts.json
+batch-accounts-resume.json
+run-resume.sh
+*.log
+*.zip
+.DS_Store

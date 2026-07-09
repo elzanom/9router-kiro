@@ -1,0 +1,8 @@
+{
+  "host": "localhost",
+  "proto": "http",
+  "port": 20128,
+  "mode": "auto",
+  "password": "REPLACE_WITH_DASHBOARD_PASSWORD_IF_REMOTE",
+  "chromiumPath": "/usr/bin/chromium"
+}

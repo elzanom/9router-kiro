@@ -1,0 +1,19 @@
+{
+  "name": "9router-kiro",
+  "version": "1.0.0",
+  "description": "Otomatisasi registrasi akun AWS Builder ID / Google OAuth untuk Kiro AI di 9router.",
+  "main": "bot.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": ["9router", "kiro", "oauth", "automation"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "puppeteer-core": "^25.3.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "sqlite3": "^6.0.1"
+  }
+}
