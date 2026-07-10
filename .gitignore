@@ -3,6 +3,7 @@ config.json
 batch-accounts.json
 batch-accounts-resume.json
 run-resume.sh
+aliases.txt
 *.log
 *.zip
 .DS_Store
