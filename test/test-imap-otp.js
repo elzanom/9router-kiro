@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { extractOtpFromRaw, buildGmrawQuery, pickRecencyMatch } = require("../imap-otp.js");
+const { extractOtpFromRaw, buildGmrawQuery, pickRecencyMatch, getOtpViaImap } = require("../imap-otp.js");
 
 test("extractOtpFromRaw: pola 'Verification code' + tag + 6 digit", () => {
   const raw = `<p>Verification code:</p><strong>573868</strong>`;
@@ -48,4 +48,85 @@ test("pickRecencyMatch: null kalau tidak ada match dalam window ber-OTP", () => 
     { uid: 1, internalDate: new Date(since - 120000), source: "verification 111111" },
   ];
   assert.equal(pickRecencyMatch(messages, { since, slackMs: 60000 }), null);
+});
+
+test("getOtpViaImap: gmraw path nemu OTP + delete-after-read", async () => {
+  const since = Date.now() - 5000;
+  let deleted = null;
+  const fakeClient = {
+    capabilities: new Set(["X-GM-EXT-1"]),
+    async getMailboxLock() { return { async release() {} }; },
+    async search() { return [100]; },
+    async fetchOne() {
+      return {
+        source: Buffer.from("Your verification code is 573868. Valid 10 min."),
+        envelope: { subject: "Verify your AWS Builder ID email address", from: [{ address: "no-reply@signin.aws" }] },
+        internalDate: new Date(since + 1000),
+      };
+    },
+    async messageDelete(uid) { deleted = uid; },
+    async logout() {},
+  };
+  const res = await getOtpViaImap(
+    { user: "u@gmail.com", password: "p", deleteAfterRead: true },
+    "abc@aleeas.com",
+    { since, maxWaitMs: 1000, pollMs: 10, clientFactory: async () => fakeClient }
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.otp, "573868");
+  assert.equal(res.from, "no-reply@signin.aws");
+  assert.equal(deleted, 100);
+});
+
+test("getOtpViaImap: fallback folder (tanpa X-GM-EXT-1), no-delete", async () => {
+  const since = Date.now() - 5000;
+  let deleted = null;
+  let searchCalls = 0;
+  const fakeClient = {
+    capabilities: new Set([]),
+    async list() { return [{ path: "INBOX", specialUse: "\\Inbox" }, { path: "[Gmail]/Spam", specialUse: "\\Junk" }]; },
+    async getMailboxLock() { return { async release() {} }; },
+    async search() { searchCalls++; return searchCalls >= 2 ? [200] : []; },
+    async fetchOne() {
+      return {
+        source: Buffer.from("verification code 209910"),
+        envelope: { subject: "Verify your AWS Builder ID email address", from: [{ address: "x@signin.aws" }] },
+        internalDate: new Date(since + 2000),
+      };
+    },
+    async messageDelete(uid) { deleted = uid; },
+    async logout() {},
+  };
+  const res = await getOtpViaImap(
+    { user: "u@gmail.com", password: "p", deleteAfterRead: false },
+    "xyz@mozmail.com",
+    { since, maxWaitMs: 3000, pollMs: 10, clientFactory: async () => fakeClient }
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.otp, "209910");
+  assert.equal(deleted, null); // deleteAfterRead false
+});
+
+test("getOtpViaImap: timeout -> {ok:false} + debug", async () => {
+  const fakeClient = {
+    capabilities: new Set(["X-GM-EXT-1"]),
+    async getMailboxLock() { return { async release() {} }; },
+    async search() { return []; },
+    async fetchOne() { return null; },
+    async logout() {},
+  };
+  const res = await getOtpViaImap(
+    { user: "u", password: "p" },
+    "a@b.com",
+    { since: Date.now(), maxWaitMs: 50, pollMs: 10, clientFactory: async () => fakeClient }
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.error, /timeout/i);
+  assert.equal(res.debug.usedGmraw, true);
+});
+
+test("getOtpViaImap: creds hilang -> gagal cepat", async () => {
+  const res = await getOtpViaImap({}, "a@b.com", { clientFactory: async () => { throw new Error("x"); } });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /tidak lengkap/i);
 });

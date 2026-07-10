@@ -46,4 +46,141 @@ function pickRecencyMatch(messages, { since = 0, slackMs = 60000 } = {}) {
   return null;
 }
 
-module.exports = { extractOtpFromRaw, buildGmrawQuery, pickRecencyMatch };
+// Factory default: buat koneksi ImapFlow. imapflow di-lazy-require di sini
+// supaya unit test (yang inject opts.clientFactory) jalan tanpa imapflow
+// terinstall.
+async function defaultClientFactory(imapCfg) {
+  const { ImapFlow } = require("imapflow");
+  const client = new ImapFlow({
+    host: imapCfg.host || "imap.gmail.com",
+    port: imapCfg.port || 993,
+    secure: imapCfg.tls !== false,
+    auth: { user: imapCfg.user, pass: imapCfg.password },
+    logger: false,
+  });
+  await client.connect();
+  return client;
+}
+
+// Cari path folder Spam via special-use \Junk, fallback [Gmail]/Spam.
+async function findSpamPath(client) {
+  try {
+    const boxes = await client.list();
+    const junk = boxes.find((b) => b.specialUse === "\\Junk");
+    if (junk && junk.path) return junk.path;
+    const namedSpam = boxes.find((b) => /spam/i.test(b.path || ""));
+    if (namedSpam) return namedSpam.path;
+  } catch {}
+  return "[Gmail]/Spam";
+}
+
+function formatFrom(envelope) {
+  const from = envelope && envelope.from;
+  if (Array.isArray(from) && from[0] && from[0].address) return from[0].address;
+  return "";
+}
+
+// Baca OTP dari Gmail untuk alias tertentu.
+// Return: { ok:true, otp, from, subject, received }
+//      atau { ok:false, error, debug:{searchedFolders, matchCount, usedGmraw} }
+async function getOtpViaImap(imapCfg, alias, opts = {}) {
+  const since = Number(opts.since) || 0;
+  const slackMs = Number(opts.slackMs) || 60000;
+  const pollMs = Number(opts.pollMs) || 5000;
+  const maxWaitMs = Number(opts.maxWaitMs) || 120000;
+  const subject = opts.subject || "Verify your AWS Builder ID email address";
+  const deleteAfterRead = imapCfg && imapCfg.deleteAfterRead !== false; // default true
+  const clientFactory = opts.clientFactory || defaultClientFactory;
+
+  const debug = { searchedFolders: [], matchCount: 0, usedGmraw: false };
+
+  if (!imapCfg || !imapCfg.user || !imapCfg.password) {
+    return { ok: false, error: "IMAP creds tidak lengkap (user/password)", debug };
+  }
+
+  let client;
+  try {
+    client = await clientFactory(imapCfg);
+  } catch (e) {
+    return { ok: false, error: `IMAP connect/auth gagal: ${e.message}`, debug };
+  }
+
+  const useGmraw = !!(
+    client.capabilities && client.capabilities.has && client.capabilities.has("X-GM-EXT-1")
+  );
+  const folders = useGmraw
+    ? ["INBOX"]
+    : ["INBOX", await findSpamPath(client)];
+
+  const start = Date.now();
+  try {
+    while (Date.now() - start < maxWaitMs) {
+      for (const folder of folders) {
+        const lock = await client.getMailboxLock(folder).catch(() => null);
+        if (!lock) continue;
+        try {
+          let uids;
+          if (useGmraw && folder === "INBOX") {
+            // gmraw global: cari lintas semua mail. Lock INBOX cuma supaya
+            // ada mailbox terpilih.
+            uids = await client.search({ gmraw: buildGmrawQuery(alias, subject) }, { uid: true });
+            debug.usedGmraw = true;
+          } else {
+            uids = await client.search({ to: alias, subject }, { uid: true });
+          }
+          if (!uids || uids.length === 0) {
+            if (!debug.searchedFolders.includes(folder)) debug.searchedFolders.push(folder);
+            continue;
+          }
+          debug.matchCount = Math.max(debug.matchCount, uids.length);
+          // Ambil maks 3 terbaru untuk recency + extraction.
+          const recentUids = uids.slice(-3);
+          const messages = [];
+          for (const uid of recentUids) {
+            const msg = await client.fetchOne(
+              uid,
+              { source: true, envelope: true, internalDate: true },
+              { uid: true }
+            );
+            if (!msg) continue;
+            messages.push({
+              uid,
+              source: msg.source ? msg.source.toString() : "",
+              envelope: msg.envelope || {},
+              internalDate: msg.internalDate ? new Date(msg.internalDate) : new Date(0),
+            });
+          }
+          const picked = pickRecencyMatch(messages, { since, slackMs });
+          if (picked) {
+            const { message, otp } = picked;
+            const result = {
+              ok: true,
+              otp,
+              from: formatFrom(message.envelope),
+              subject: (message.envelope && message.envelope.subject) || subject,
+              received: message.internalDate.toISOString(),
+            };
+            if (deleteAfterRead) {
+              try { await client.messageDelete(message.uid, { uid: true }); } catch {}
+            }
+            return result;
+          }
+        } finally {
+          try { lock.release(); } catch {}
+        }
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  } finally {
+    try { await client.logout(); } catch {}
+  }
+  return { ok: false, error: `OTP timeout ${Math.round(maxWaitMs / 1000)}s`, debug };
+}
+
+module.exports = {
+  extractOtpFromRaw,
+  buildGmrawQuery,
+  pickRecencyMatch,
+  findSpamPath,
+  getOtpViaImap,
+};
