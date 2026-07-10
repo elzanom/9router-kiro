@@ -54,16 +54,16 @@ Perilaku:
 - Catat `submitTime = Date.now()` **tepat setelah klik submit pada step NAME** (submit name inilah yang memicu AWS mengirim code — bukan submit email); dipakai sebagai guard recency (lihat Matching).
 
 **Search (Gmail `X-GM-RAW`, primary):**
-- Query: `to:<alias> subject:"Verify your AWS Builder ID email address"`.
-- Nyari **lintas semua mail** → otomatis ke-cover Inbox + Spam + All Mail. Menjawarkan "forwarder sering masuk spam".
+- Query: `to:<alias> subject:"Verify your AWS Builder ID email address" in:anywhere`.
+- **PENTING (koreksi 2026-07-11)**: `in:anywhere` di gmraw TIDAK bypass mailbox scope — query hanya melihat UIDs di folder yang sedang di-lock. Harus lock Spam juga secara eksplisit untuk cover OTP yang masuk Spam.
+- Implementasi: loop `["INBOX", spamPath]`, lock per folder, run gmraw di masing-masing, dedupe UID, simpan folder asal per message untuk delete.
 - Ambil match terbaru (`internalDate` terbesar) yang `internalDate >= submitTime - 60s` (slack forwarding-latency).
 
 **Fallback kalau primary kosong (forwarder rewrite `To:`) — *amendment 2026-07-11*:**
 - E2E (2026-07-10) menemukan Firefox Relay me-rewrite `To:` ke Gmail tujuan (`tauvindpwtuba@gmail.com`) — query `to:<alias>` jadi tidak match (0 result, OTP timeout 120s).
-- Query sekunder: `from:signin.aws subject:"Verify your AWS Builder ID email address"`.
+- Query sekunder: `from:signin.aws subject:"Verify your AWS Builder ID email address" in:anywhere`.
 - `pickRecencyMatch` tetap menyaring (`internalDate >= since - slackMs`) → batch paralel + OTP lama tidak salah-match.
 - `debug.usedFallback = true` ditambahkan ke result untuk observability.
-- Berlaku hanya pada path `X-GM-EXT-1` (gmraw global); path IMAP-only tetap hanya query `to:alias` (kurang umum, fallback spam sudah cukup).
 
 **Fallback (kalau server gak iklan `X-GM-EXT-1`):**
 - Deteksi folder Spam via special-use flag `\Junk` (`client.list()`), fallback nama `[Gmail]/Spam`.
