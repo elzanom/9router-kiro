@@ -29,6 +29,14 @@ function buildGmrawQuery(alias, subject) {
   return `to:${alias} subject:"${subject}"`;
 }
 
+// Fallback gmraw query untuk forwarder yang rewrite header To (mis. Firefox
+// Relay): cari berdasarkan subject AWS + sender domain, bukan To. Recency
+// window di pickRecencyMatch (since - slack) tetap melindungi dari match
+// OTP lama / tabrakan batch.
+function buildGmrawFallbackQuery(subject) {
+  return `from:signin.aws subject:"${subject}"`;
+}
+
 // Dari daftar match (sudah di-fetch: punya internalDate + source), pilih
 // yang TERBARU dalam window recency (internalDate >= since - slack) dan
 // mengandung OTP. Return { message, otp } atau null.
@@ -119,15 +127,33 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
         const lock = await client.getMailboxLock(folder).catch(() => null);
         if (!lock) continue;
         try {
-          let uids;
+          // Bangun daftar query: primary (to: alias), fallback (subject + sender)
+          // untuk forwarder yang rewrite To header (mis. Firefox Relay).
+          let queries;
           if (useGmraw && folder === "INBOX") {
-            // gmraw global: cari lintas semua mail. Lock INBOX cuma supaya
-            // ada mailbox terpilih.
-            uids = await client.search({ gmraw: buildGmrawQuery(alias, subject) }, { uid: true });
+            queries = [
+              { q: buildGmrawQuery(alias, subject), type: "to" },
+              { q: buildGmrawFallbackQuery(subject), type: "fallback" },
+            ];
             debug.usedGmraw = true;
           } else {
-            uids = await client.search({ to: alias, subject }, { uid: true });
+            queries = [{ q: null, type: "imap" }]; // use imap {to,subject} below
           }
+
+          let uids = [];
+          let usedFallback = false;
+          for (const { q, type } of queries) {
+            const r = type === "imap"
+              ? await client.search({ to: alias, subject }, { uid: true })
+              : await client.search({ gmraw: q }, { uid: true });
+            if (r && r.length > 0) {
+              uids = r;
+              if (type === "fallback") usedFallback = true;
+              break;
+            }
+          }
+          debug.usedFallback = debug.usedFallback || usedFallback;
+
           if (!uids || uids.length === 0) {
             if (!debug.searchedFolders.includes(folder)) debug.searchedFolders.push(folder);
             continue;
@@ -159,6 +185,7 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
               from: formatFrom(message.envelope),
               subject: (message.envelope && message.envelope.subject) || subject,
               received: message.internalDate.toISOString(),
+              debug,
             };
             if (deleteAfterRead) {
               try { await client.messageDelete(message.uid, { uid: true }); } catch {}
@@ -180,6 +207,7 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
 module.exports = {
   extractOtpFromRaw,
   buildGmrawQuery,
+  buildGmrawFallbackQuery,
   pickRecencyMatch,
   findSpamPath,
   getOtpViaImap,

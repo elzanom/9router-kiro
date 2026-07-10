@@ -58,6 +58,13 @@ Perilaku:
 - Nyari **lintas semua mail** → otomatis ke-cover Inbox + Spam + All Mail. Menjawarkan "forwarder sering masuk spam".
 - Ambil match terbaru (`internalDate` terbesar) yang `internalDate >= submitTime - 60s` (slack forwarding-latency).
 
+**Fallback kalau primary kosong (forwarder rewrite `To:`) — *amendment 2026-07-11*:**
+- E2E (2026-07-10) menemukan Firefox Relay me-rewrite `To:` ke Gmail tujuan (`tauvindpwtuba@gmail.com`) — query `to:<alias>` jadi tidak match (0 result, OTP timeout 120s).
+- Query sekunder: `from:signin.aws subject:"Verify your AWS Builder ID email address"`.
+- `pickRecencyMatch` tetap menyaring (`internalDate >= since - slackMs`) → batch paralel + OTP lama tidak salah-match.
+- `debug.usedFallback = true` ditambahkan ke result untuk observability.
+- Berlaku hanya pada path `X-GM-EXT-1` (gmraw global); path IMAP-only tetap hanya query `to:alias` (kurang umum, fallback spam sudah cukup).
+
 **Fallback (kalau server gak iklan `X-GM-EXT-1`):**
 - Deteksi folder Spam via special-use flag `\Junk` (`client.list()`), fallback nama `[Gmail]/Spam`.
 - Search INBOX dulu (`TO <alias>` + `SUBJECT ...`), lalu folder Spam — di tiap poll.

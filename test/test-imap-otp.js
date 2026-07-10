@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { extractOtpFromRaw, buildGmrawQuery, pickRecencyMatch, getOtpViaImap } = require("../imap-otp.js");
+const { extractOtpFromRaw, buildGmrawQuery, buildGmrawFallbackQuery, pickRecencyMatch, getOtpViaImap } = require("../imap-otp.js");
 
 test("extractOtpFromRaw: pola 'Verification code' + tag + 6 digit", () => {
   const raw = `<p>Verification code:</p><strong>573868</strong>`;
@@ -129,4 +129,51 @@ test("getOtpViaImap: creds hilang -> gagal cepat", async () => {
   const res = await getOtpViaImap({}, "a@b.com", { clientFactory: async () => { throw new Error("x"); } });
   assert.equal(res.ok, false);
   assert.match(res.error, /tidak lengkap/i);
+});
+
+test("buildGmrawFallbackQuery: from:signin.aws + subject", () => {
+  assert.equal(
+    buildGmrawFallbackQuery("Verify your AWS Builder ID email address"),
+    `from:signin.aws subject:"Verify your AWS Builder ID email address"`
+  );
+});
+
+test("getOtpViaImap: fallback path (To-rewrite) nemu OTP + debug.usedFallback", async () => {
+  const since = Date.now() - 5000;
+  let deleted = null;
+  let searchCalls = [];
+  const fakeClient = {
+    capabilities: new Set(["X-GM-EXT-1"]),
+    async getMailboxLock() { return { async release() {} }; },
+    async search(criteria) {
+      // Log query, return [] for "to:" (simulating Relay rewrite),
+      // then [300] for the fallback "from:signin.aws".
+      const q = criteria.gmraw || JSON.stringify(criteria);
+      searchCalls.push(q);
+      if (q.startsWith("to:")) return [];
+      return [300];
+    },
+    async fetchOne() {
+      return {
+        source: Buffer.from("verification 888222"),
+        envelope: { subject: "Verify your AWS Builder ID email address", from: [{ address: "no-reply@signin.aws" }] },
+        internalDate: new Date(since + 3000),
+      };
+    },
+    async messageDelete(uid) { deleted = uid; },
+    async logout() {},
+  };
+  const res = await getOtpViaImap(
+    { user: "u@gmail.com", password: "p", deleteAfterRead: true },
+    "abc@mozmail.com",
+    { since, maxWaitMs: 1000, pollMs: 10, clientFactory: async () => fakeClient }
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.otp, "888222");
+  assert.equal(deleted, 300);
+  assert.equal(res.debug.usedFallback, true);
+  // Pastikan kedua query dipanggil
+  assert.equal(searchCalls.length, 2);
+  assert.ok(searchCalls[0].startsWith("to:abc@mozmail.com"));
+  assert.ok(searchCalls[1].startsWith("from:signin.aws"));
 });
