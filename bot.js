@@ -1352,7 +1352,7 @@ async function pollUntilConnected(config, deviceData, email) {
 // ============================================================
 async function processAccount(config, account) {
   const method = (account.method || "google").toLowerCase();
-  const label = account.priyoUsername || account.email || `account-${Date.now()}`;
+  const label = account.email || `account-${Date.now()}`;
   console.log(`\n${"=".repeat(60)}`);
   console.log(`Proses: ${label} (method=${method})`);
   console.log(`${"=".repeat(60)}`);
@@ -1368,8 +1368,16 @@ async function processAccount(config, account) {
     await automateKiroGoogleLogin(config, account.email, account.password, deviceData);
     resolvedEmail = account.email;
   } else if (method === "email" || method === "priyo") {
+    if (method === "priyo") {
+      console.log(`⚠️  method "priyo" deprecated → diperlakukan sebagai "email".`);
+    }
+    if (!config.imap || !config.imap.user || !config.imap.password) {
+      throw new Error(
+        "Method 'email' butuh config IMAP (user + password). Isi block 'imap' di config.json atau --imap-user/--imap-password."
+      );
+    }
     const result = await automateKiroEmailLogin(config, deviceData, account);
-    resolvedEmail = result.email || account.priyoUsername || account.email || label;
+    resolvedEmail = result.email || account.email || label;
   } else {
     throw new Error(`Method tidak dikenal: ${method} (pakai 'google' atau 'email')`);
   }
@@ -1508,7 +1516,7 @@ async function interactiveRun(config) {
   try {
     console.log("\n🤖 9router Kiro Bot — Mode Interaktif\n");
     console.log("Pilih mode registrasi:");
-    console.log("  1) Email via priyo.email   → akun AWS Builder ID baru, otomatis");
+    console.log("  1) Email via alias forwarder  → akun AWS Builder ID baru (OTP via IMAP Gmail)");
     console.log("  2) Google OAuth            → butuh email + password Google");
     const modeChoice = await askPrompt(rl, "Pilih [1/2]", "1");
     const method = modeChoice === "2" ? "google" : "email";
@@ -1517,16 +1525,30 @@ async function interactiveRun(config) {
 
     const accounts = [];
     if (method === "email") {
-      const prefix = await askPrompt(rl, "Prefix username priyo? (kosong = random tiap akun)", "");
+      // Minta file berisi list alias forwarder (one-per-line atau JSON array).
+      const aliasFile = await askPrompt(rl, "Path file list alias forwarder? (one-per-line atau JSON array)", "");
+      let aliases = [];
+      if (aliasFile && fs.existsSync(aliasFile)) {
+        const raw = fs.readFileSync(aliasFile, "utf8").trim();
+        aliases = raw.startsWith("[")
+          ? JSON.parse(raw).map((x) => String(x).trim()).filter(Boolean)
+          : raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      } else {
+        console.log(`⚠️  File tidak ditemukan ("${aliasFile}"). Masukkan alias manual satu per satu.`);
+      }
+      while (aliases.length < count) {
+        const a = await askPrompt(rl, `Alias ke-${aliases.length + 1} (Enter = selesai)`, "");
+        if (!a) break;
+        aliases.push(a.trim());
+      }
       const customName = await askPrompt(rl, "Nama tampilan AWS? (kosong = random realistis)", "");
-      for (let i = 0; i < count; i++) {
-        const acc = { method: "email" };
-        if (prefix) {
-          // prefix + nomor urut, validasi 3-15 char alfanumerik
-          let u = `${prefix}${count > 1 ? i + 1 : ""}`.toLowerCase().replace(/[^a-z0-9.]/g, "");
-          if (u.length < 3) u = (u + Math.random().toString(36).slice(2, 6)).slice(0, 15);
-          acc.priyoUsername = u.slice(0, 15);
-        }
+      const useAliases = aliases.slice(0, count);
+      if (useAliases.length === 0) {
+        console.log("⚠️  Tidak ada alias. Batal.");
+        return;
+      }
+      for (const alias of useAliases) {
+        const acc = { method: "email", email: alias };
         if (customName) acc.name = customName;
         accounts.push(acc);
       }
@@ -1647,14 +1669,15 @@ opsi tiap mode, jeda antar akun, lalu konfirmasi sebelum jalan.
 
 Method per akun di batch JSON (field 'method'):
   - "google" (default) — butuh email + password Google
-  - "email"            — daftar via AWS email + priyo.email inbox (verifikasi via 6-digit code)
-      priyoUsername (optional) — custom username; default: random
+  - "email"            — daftar via AWS email + alias forwarder (OTP dibaca via IMAP Gmail)
+      email (wajib)       — alias forwarder (mis. abc@aleeas.com, xyz@mozmail.com)
+      name (optional)     — nama tampilan AWS; default: random realistis
 
 Contoh batch-accounts.json:
   [
     { "email": "txn1@fvcksuite.com", "password": "your-google-password", "method": "google" },
-    { "method": "email" },
-    { "method": "email", "priyoUsername": "mybuildera" }
+    { "method": "email", "email": "abc@aleeas.com" },
+    { "method": "email", "email": "xyz@mozmail.com", "name": "Sandra Costa" }
   ]
 
 Config flags (CLI > env > config.json > default):
@@ -1664,6 +1687,10 @@ Config flags (CLI > env > config.json > default):
   --mode auto|local|remote          default auto
   --password / NINEROUTER_PASSWORD  dashboard password (required in remote)
   --chromium / NINEROUTER_CHROMIUM  default /usr/bin/chromium
+  --imap-user / NINEROUTER_IMAP_USER          alamat Gmail (mode email)
+  --imap-password / NINEROUTER_IMAP_PASSWORD  Gmail App Password (mode email)
+  --imap-host / NINEROUTER_IMAP_HOST          default imap.gmail.com
+  --no-delete-otp                             jangan hapus email OTP setelah dibaca
 
 Examples:
   # Interactive (pilih mode + loop):
@@ -1672,7 +1699,9 @@ Examples:
   node bot.js add txn1@fvcksuite.com 'your-google-password' --host your-9router-host --proto https --password '<dashboard-password>'
   # Local:
   node bot.js add txn1@fvcksuite.com 'your-google-password'
-  # Batch JSON (campuran Google + email via priyo):
+  # 1 akun via alias forwarder (OTP IMAP):
+  node bot.js add abc@aleeas.com --method email
+  # Batch JSON (campuran Google + email via alias):
   node bot.js add accounts.json
 `);
 }
@@ -1707,12 +1736,19 @@ async function main() {
     case "browser": {
       const arg2 = positional[1];
       const arg3 = positional[2];
-      if (arg2 && arg3) {
+      const mFlag = (flags.method || "").toLowerCase();
+      if (arg2 && (mFlag === "email" || mFlag === "priyo")) {
+        // add <alias> --method email [password] [--name "..."]
+        const acc = { method: "email", email: arg2 };
+        if (arg3) acc.password = arg3;
+        if (flags.name && flags.name !== true) acc.name = String(flags.name);
+        await processAccount(config, acc);
+      } else if (arg2 && arg3) {
         await processAccount(config, { email: arg2, password: arg3 });
       } else if (arg2 && fs.existsSync(arg2)) {
         await batchFromFile(config, arg2);
       } else {
-        console.log("Usage: node bot.js add <email> <password> | <accounts.json>");
+        console.log("Usage: node bot.js add <email> <password> | add <alias> --method email | <accounts.json>");
       }
       break;
     }
