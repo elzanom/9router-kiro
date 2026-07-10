@@ -948,10 +948,17 @@ async function automateKiroEmailLogin(config, deviceData, account) {
 
     // Tunggu kode verifikasi dari AWS via IMAP (Gmail, alias forwarder).
     if (!submitTime) submitTime = Date.now();
-    console.log(`[${label}] 5/6 Menunggu verification code via IMAP (max 120s)...`);
+    console.log(`[${label}] 5/6 Menunggu verification code via IMAP (max 150s)...`);
+    // Delay awal supaya AWS kirim + Relay forward + Gmail terima selesai
+    // sebelum poll pertama. Tanpa delay, kita cenderung poll sebelum email
+    // ada di Gmail dan buang cycle (bisa juga trigger false negative di
+    // beberapa chain).
+    const initialDelayMs = 15000;
+    console.log(`[${label}]    Initial delay ${initialDelayMs / 1000}s (AWS send → Relay forward → Gmail receive)...`);
+    await new Promise((r) => setTimeout(r, initialDelayMs));
     const otpResult = await getOtpViaImap(config.imap, alias, {
       since: submitTime,
-      maxWaitMs: 120000,
+      maxWaitMs: 135000,
     });
     if (!otpResult.ok) {
       console.log(`[${label}]    IMAP error: ${otpResult.error}`);

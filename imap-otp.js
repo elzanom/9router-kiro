@@ -23,10 +23,11 @@ function extractOtpFromRaw(raw) {
 }
 
 // Bangun query Gmail X-GM-RAW: cari email To alias + subject spesifik.
-// gmraw mencari lintas SEMUA mail Gmail (Inbox + Spam + All) -> forwarder
-// yang masuk Spam tetap ke-cover.
+// `in:anywhere` eksplisit agar Spam + Trash ikut ke-search (default-nya
+// gmraw sudah mencakup All Mail, tapi eksplisit lebih aman kalau Gmail
+// berubah default).
 function buildGmrawQuery(alias, subject) {
-  return `to:${alias} subject:"${subject}"`;
+  return `to:${alias} subject:"${subject}" in:anywhere`;
 }
 
 // Fallback gmraw query untuk forwarder yang rewrite header To (mis. Firefox
@@ -34,7 +35,7 @@ function buildGmrawQuery(alias, subject) {
 // window di pickRecencyMatch (since - slack) tetap melindungi dari match
 // OTP lama / tabrakan batch.
 function buildGmrawFallbackQuery(subject) {
-  return `from:signin.aws subject:"${subject}"`;
+  return `from:signin.aws subject:"${subject}" in:anywhere`;
 }
 
 // Dari daftar match (sudah di-fetch: punya internalDate + source), pilih

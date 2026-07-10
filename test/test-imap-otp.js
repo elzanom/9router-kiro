@@ -23,10 +23,10 @@ test("extractOtpFromRaw: null kalau tidak ada OTP", () => {
   assert.equal(extractOtpFromRaw(null), null);
 });
 
-test("buildGmrawQuery: format to: + subject:", () => {
+test("buildGmrawQuery: format to: + subject: + in:anywhere (Spam-safe)", () => {
   assert.equal(
     buildGmrawQuery("abc@aleeas.com", "Verify your AWS Builder ID email address"),
-    `to:abc@aleeas.com subject:"Verify your AWS Builder ID email address"`
+    `to:abc@aleeas.com subject:"Verify your AWS Builder ID email address" in:anywhere`
   );
 });
 
@@ -131,10 +131,10 @@ test("getOtpViaImap: creds hilang -> gagal cepat", async () => {
   assert.match(res.error, /tidak lengkap/i);
 });
 
-test("buildGmrawFallbackQuery: from:signin.aws + subject", () => {
+test("buildGmrawFallbackQuery: from:signin.aws + subject + in:anywhere", () => {
   assert.equal(
     buildGmrawFallbackQuery("Verify your AWS Builder ID email address"),
-    `from:signin.aws subject:"Verify your AWS Builder ID email address"`
+    `from:signin.aws subject:"Verify your AWS Builder ID email address" in:anywhere`
   );
 });
 
