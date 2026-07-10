@@ -3,7 +3,7 @@
 Tool CLI (Node.js) untuk **otomatisasi registrasi akun Kiro AI ke 9router** lewat alur AWS SSO OIDC device code. Mendukung dua mode sign-in:
 
 - **Google OAuth** — login pakai akun Google (`email` + `password`).
-- **Email via priyo.email** — bikin akun AWS Builder ID baru dengan alamat priyo.email (random atau custom), verifikasi 6-digit code dibaca otomatis dari tab kedua.
+- **Email via alias forwarder** — bikin akun AWS Builder ID baru dengan alamat alias (SimpleLogin / Firefox Relay) yang forward ke Gmail; verifikasi 6-digit code dibaca otomatis via IMAP.
 
 > ⚠️ **Etika & ToS:** Tool ini mengotomatiskan login untuk akun yang kamu punya kredensialnya, ke instance 9router milikmu sendiri. Gunakan dengan jeda yang wajar dan hormati Terms of Service pihak terkait.
 
@@ -191,9 +191,9 @@ Buat file `accounts.json` berisi array. Field `method` menentukan mode tiap akun
 [
   { "email": "txn1@fvcksuite.com", "password": "your-google-password", "method": "google" },
   { "email": "txn2@fvcksuite.com", "password": "your-google-password", "method": "google" },
-  { "method": "email" },
-  { "method": "email", "priyoUsername": "mybuildera" },
-  { "method": "email", "name": "John Doe", "password": "CustomKiroPass!1" }
+  { "method": "email", "email": "abc@aleeas.com" },
+  { "method": "email", "email": "xyz@mozmail.com", "name": "Sandra Costa" },
+  { "method": "email", "email": "def@aleeas.com", "password": "CustomKiroPass!1" }
 ]
 ```
 
@@ -202,11 +202,11 @@ Buat file `accounts.json` berisi array. Field `method` menentukan mode tiap akun
 | `method` | keduanya | — | `"google"` (default) atau `"email"` |
 | `email` | google | ya | email akun Google |
 | `password` | google | ya | password akun Google |
-| `email`/`password` | email | — | override password AWS Builder ID (default: di-generate random kuat) |
-| `priyoUsername` | email | — | custom username priyo (`username@priyomail.org`); kosong = random |
+| `email` | email | ya | alias forwarder (mis. `abc@aleeas.com`, `xyz@mozmail.com`) |
+| `password` | email | — | override password AWS Builder ID (default: di-generate random kuat) |
 | `name` | email | — | nama tampilan AWS Builder ID; kosong = nama realistis random |
 
-> Mode `email`: domain default `priyomail.org` (yang diterima AWS). Username random dibuat 3–15 karakter. Nama default di-generate dari daftar nama realistis (mis. "Sandra Costa").
+> Mode `email`: butuh alias forwarder yang forward ke Gmail penerima. OTP dibaca via IMAP Gmail (`X-GM-RAW`, mencakup Spam). Isi block `imap` di `config.json`. Nama default dari daftar nama realistis (mis. "Sandra Costa").
 
 ---
 
@@ -225,6 +225,10 @@ Prioritas (yang pertama menang): **flag CLI → env var → `config.json` → de
 | `dbPath` | `--db-path` | `NINEROUTER_DB_PATH` | `~/.9router/db/data.sqlite` | (local) |
 | `machineIdPath` | `--machine-id-path` | `NINEROUTER_MACHINE_ID_PATH` | `~/.9router/machine-id` | (local) |
 | `cliSecretPath` | `--cli-secret-path` | `NINEROUTER_CLI_SECRET_PATH` | `~/.9router/auth/cli-secret` | (local) |
+| `imap.user` | `--imap-user` | `NINEROUTER_IMAP_USER` | — | mode email |
+| `imap.password` | `--imap-password` | `NINEROUTER_IMAP_PASSWORD` | — | mode email |
+| `imap.host` | `--imap-host` | `NINEROUTER_IMAP_HOST` | `imap.gmail.com` | — |
+| `imap.deleteAfterRead` | `--no-delete-otp` | — | `true` | — |
 
 Format flag: `--key value` atau `--key=value`. Contoh lengkap env + flag:
 
@@ -248,15 +252,16 @@ node bot.js add accounts.json --host your-9router-host --proto https --password 
 4. Konfirmasi device code + izin aplikasi `kiro-oauth-client`.
 5. Poll `/api/oauth/kiro/poll` sampai 9router menyimpan koneksi Kiro.
 
-### Mode `email` (priyo.email)
+### Mode `email` (alias forwarder + IMAP)
 1. Meminta *device code* dari 9router.
-2. Buka 2 tab: AWS verifikasi (tab 1) + priyo.email (tab 2).
-3. Tab 1: pilih "Sign in with email" / form email AWS Builder ID.
-4. Tab 2: ambil alamat random atau bikin custom username (`priyoUsername`).
-5. Submit email ke AWS → AWS kirim kode verifikasi ke priyo.email.
-6. Bot fokus tab priyo, **reload** untuk ambil inbox baru, lalu baca inbox & ekstrak 6-digit code dari DOM.
-7. Submit code ke AWS, isi password baru, lanjut konfirmasi device + Kiro consent.
-8. Poll 9router sampai koneksi tersimpan.
+2. Buka 1 tab: AWS verifikasi. Alias forwarder sudah disediakan via input (file/arg/interactive).
+3. Pilih "Sign in with email" / form email AWS Builder ID, isi alias, submit.
+4. Isi field nama (nama random realistis kalau kosong) → **submit nama** (memicu AWS mengirim kode).
+5. Bot baca kode verifikasi via IMAP Gmail — search `X-GM-RAW` lintas semua mail (`to:<alias> subject:"Verify your AWS Builder ID email address"`), mencakup Spam. Setelah dibaca, email dihapus (`deleteAfterRead`, bisa dimatikan `--no-delete-otp`).
+6. Submit code ke AWS, isi password baru, lanjut konfirmasi device + Kiro consent.
+7. Poll 9router sampai koneksi tersimpan; koneksi di-rename = alias.
+
+> **Prasyarat IMAP:** akun Gmail penerima wajib 2FA + App Password. Isi block `imap` di `config.json` (lihat `config.example.json`). Disarankan filter Gmail `from:(signin.aws) → Never send it to Spam` biar cepat (walau bot tetap cari Spam).
 
 ---
 
@@ -269,7 +274,8 @@ node bot.js add accounts.json --host your-9router-host --proto https --password 
 - **Google CAPTCHA / challenge** — login otomatis beruntun memicu challenge. Bot menycreenshot ke `/tmp` lalu berhenti; kasih jeda lalu ulang.
 - **Device code expired** — browser terlalu lama; coba ulang.
 - **Consent / tombol AWS tidak ter-klik** — AWS/Kiro sering ganti class tombol. Jalankan dengan `headless: false` (edit `launchStealthBrowser`) dan lanjut manual kalau perlu.
-- **Domain priyo ditolak AWS (ERR-837)** — bot otomatis ganti ke email priyo lain; domain `priyomail.org` sudah diverifikasi diterima AWS.
+- **Alias ditolak AWS (ERR-837)** — alias forwarder tertentu bisa kena blocklist AWS. Ganti alias di list. Kalau satu provider (mis. domain SimpleLogin) mulai ditolak massal, campur dengan provider lain (mis. Firefox Relay).
+- **OTP tidak ketemu via IMAP (timeout 120s)** — cek: (a) App Password benar + 2FA aktif; (b) email forwarder benar-benar diteruskan ke Gmail penerima; (c) `to:` header di-rewrite provider (jarang) — lihat `debug.searchedFolders`. Tambah filter Gmail `from:(signin.aws) → Never send it to Spam`.
 
 ---
 

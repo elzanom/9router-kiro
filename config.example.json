@@ -4,5 +4,13 @@
   "port": 20128,
   "mode": "auto",
   "password": "REPLACE_WITH_DASHBOARD_PASSWORD_IF_REMOTE",
-  "chromiumPath": "/usr/bin/chromium"
+  "chromiumPath": "/usr/bin/chromium",
+  "imap": {
+    "host": "imap.gmail.com",
+    "port": 993,
+    "user": "REPLACE_WITH_GMAIL_ADDRESS",
+    "password": "REPLACE_WITH_GMAIL_APP_PASSWORD",
+    "tls": true,
+    "deleteAfterRead": true
+  }
 }
