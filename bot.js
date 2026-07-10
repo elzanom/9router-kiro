@@ -23,10 +23,12 @@ const puppeteerExtra = addExtra(puppeteer);
 puppeteerExtra.use(StealthPlugin());
 const sqlite3 = require("sqlite3");
 const fs = require("fs");
+const readline = require("readline");
 
 const { loadConfig, parseCliFlags } = require("./config");
 const { resolveAuthHeaders } = require("./auth");
 const { request } = require("./http-client");
+const { getOtpViaImap } = require("./imap-otp");
 
 // ============================================================
 // 9ROUTER API
@@ -1039,15 +1041,22 @@ async function automateKiroGoogleLogin(config, email, password, deviceData) {
 // KIRO OAUTH AUTOMATION (Priyo email + AWS email sign-in)
 // ============================================================
 async function automateKiroEmailLogin(config, deviceData, account) {
-  const label = account.priyoUsername || account.email || "priyo";
-  console.log(`\n[${label}] Memulai Kiro OAuth flow (email via priyo.email)...`);
+  const alias = account.email;
+  if (!alias || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(alias)) {
+    throw new Error(
+      `Method 'email' butuh field 'email' berisi alias forwarder yang valid (dapat: "${alias || ""}")`
+    );
+  }
+  const label = alias;
+  console.log(`\n[${label}] Memulai Kiro OAuth flow (email via alias forwarder + IMAP)...`);
 
   const browser = await launchStealthBrowser(config);
   let approved = false;
-  let resolvedEmail = account.email;
+  let resolvedEmail = alias;
+  let submitTime = 0;
 
   try {
-    // Tab 1: AWS / Kiro flow
+    // Hanya 1 tab: AWS / Kiro flow. OTP dibaca via IMAP (imap-otp.js).
     const page = await newStealthPage(browser);
 
     console.log(`[${label}] 1/6 Membuka halaman verifikasi AWS...`);
@@ -1138,23 +1147,8 @@ async function automateKiroEmailLogin(config, deviceData, account) {
     }
     await new Promise((r) => setTimeout(r, 2000));
 
-    // Tab 2: priyo.email
-    console.log(`[${label}] 3/6 Membuka priyo.email untuk alamat email...`);
-    const priyoPage = await openPriyoTab(browser);
-
-    // Selalu pakai create custom mail dengan domain priyomail.org (yang AWS terima).
-    // Username di-generate unik jika user tidak specify — supaya tidak konflik
-    // dengan akun yang sudah dibuat di run sebelumnya.
-    // PENTING: priyo hanya izinkan 3-15 karakter.
-    const useUsername = (account.priyoUsername && /^[a-z0-9.]{3,15}$/i.test(account.priyoUsername))
-      ? account.priyoUsername
-      : `k${Date.now().toString(36).slice(-6)}${Math.random().toString(36).slice(2, 4)}`;
-    console.log(`[${label}]    Membuat custom username: ${useUsername}@priyomail.org`);
-    const chosenDomain = await createCustomPriyoUsername(priyoPage, useUsername, "priyomail.org");
-    console.log(`[${label}]    Domain: ${chosenDomain}`);
-    let priyoInfo = await getPriyoEmail(priyoPage);
-    console.log(`[${label}]    Email priyo: ${priyoInfo.email}`);
-    resolvedEmail = priyoInfo.email;
+    // Alias sudah diberikan via account.email (dari file/arg/interactive).
+    console.log(`[${label}] 3/6 Alias forwarder: ${alias} (OTP dibaca via IMAP)`);
 
     // Submit email ke AWS
     console.log(`[${label}] 4/6 Submit email ke AWS Builder ID...`);
@@ -1170,7 +1164,7 @@ async function automateKiroEmailLogin(config, deviceData, account) {
       throw new Error(`Field email tidak ditemukan. Screenshot: ${ssPath}`);
     }
     await emailInput.focus();
-    await emailInput.type(priyoInfo.email, { delay: 60 });
+    await emailInput.type(alias, { delay: 60 });
     await new Promise((r) => setTimeout(r, 800));
     // Submit via Enter atau tombol Next/Continue
     let submitted = await clickByText(page, ["Next", "Continue", "Send code", "Submit"]);
@@ -1361,6 +1355,8 @@ async function automateKiroEmailLogin(config, deviceData, account) {
       const clickResult = await clickByText(page, ["Next", "Continue", "Send code", "Submit", "Create account"]);
       console.log(`[${label}]    Name submit click result: ${clickResult || "(none, falling back to Enter)"}`);
       if (!clickResult) await page.keyboard.press("Enter");
+      // Submit name inilah yang memicu AWS mengirim kode verifikasi.
+      submitTime = Date.now();
       // Tunggu AWS selesai transisi setelah submit nama (code akan di-trigger)
       const submittedOk = await page
         .waitForFunction(
@@ -1385,19 +1381,9 @@ async function automateKiroEmailLogin(config, deviceData, account) {
           return m ? m[0] : null;
         }).catch(() => null);
         if (awsErr) {
-          console.log(`[${label}]    ⚠️  AWS error: ${awsErr} — kemungkinan domain priyo diblokir, ganti email...`);
-          // Refresh priyo untuk dapetin domain baru
-          if (priyoPage) {
-            await focusPage(priyoPage);
-            await clickRandomPriyoEmail(priyoPage).catch(() => null);
-            await new Promise((r) => setTimeout(r, 1500));
-            priyoInfo = await getPriyoEmail(priyoPage);
-            console.log(`[${label}]    Retry dengan email baru: ${priyoInfo.email}`);
-            // Reload halaman AWS — back ke email entry
-            await focusPage(page);
-            await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => null);
-            await new Promise((r) => setTimeout(r, 2000));
-          }
+          // Alias forwarder tetap (tidak ada domain rotation). Kalau ditolak,
+          // akun ini gagal -> batch lanjut alias berikutnya.
+          throw new Error(`AWS menolak alias "${alias}" (${awsErr}) — ganti alias di list.`);
         }
       }
       await new Promise((r) => setTimeout(r, 2000));
@@ -1409,34 +1395,17 @@ async function automateKiroEmailLogin(config, deviceData, account) {
       await dumpNamePageState("noname");
     }
 
-    // Tunggu kode verifikasi dari AWS via priyo inbox
-    console.log(`[${label}] 5/6 Menunggu verifikasi code dari AWS di priyo.email (max 120s)...`);
-    // Kembalikan fokus ke priyo untuk inbox polling (BUKAN ke AWS)
-    if (priyoPage) await focusPage(priyoPage);
-    // Refresh halaman priyo supaya inbox baru (email verifikasi AWS yang baru
-    // dikirim setelah submit name) langsung ke-fetch. priyo.email kadang tidak
-    // auto-update inbox lewat polling internal, jadi reload full paling reliable
-    // (ini yang dilakukan manual saat testing).
-    if (priyoPage) {
-      try {
-        await priyoPage.reload({ waitUntil: "domcontentloaded", timeout: 20000 });
-        await new Promise((r) => setTimeout(r, 1500));
-        console.log(`[${label}]    Priyo page di-refresh untuk ambil inbox baru`);
-      } catch (e) {
-        console.log(`[${label}]    Priyo reload gagal (${String(e).slice(0, 80)}), lanjut pakai polling`);
-      }
-    }
-    const otpResult = await getPriyoOtp(
-      priyoPage,
-      "Verify your AWS Builder ID email address",
-      { maxWaitMs: 120000 }
-    );
+    // Tunggu kode verifikasi dari AWS via IMAP (Gmail, alias forwarder).
+    if (!submitTime) submitTime = Date.now();
+    console.log(`[${label}] 5/6 Menunggu verification code via IMAP (max 120s)...`);
+    const otpResult = await getOtpViaImap(config.imap, alias, {
+      since: submitTime,
+      maxWaitMs: 120000,
+    });
     if (!otpResult.ok) {
-      const ssPath = `/tmp/kiro-priyo-msg-${Date.now()}.png`;
-      await priyoPage.screenshot({ path: ssPath }).catch(() => {});
-      console.log(`[${label}]    getPriyoOtp error: ${otpResult.error}`);
+      console.log(`[${label}]    IMAP error: ${otpResult.error}`);
       console.log(`[${label}]    debug: ${JSON.stringify(otpResult.debug).slice(0, 500)}`);
-      throw new Error(`Tidak bisa ekstrak verification code. ${otpResult.error}. Screenshot: ${ssPath}`);
+      throw new Error(`Tidak bisa baca verification code via IMAP. ${otpResult.error}`);
     }
     const code = otpResult.otp;
     console.log(
@@ -1677,9 +1646,6 @@ async function automateKiroEmailLogin(config, deviceData, account) {
       console.log(`[${label}]    Field password tidak ditemukan dalam 25s (mungkin sudah ada akun / langsung ke consent)`);
     }
 
-    // Tutup tab priyo agar tidak mengganggu loop approval berikutnya
-    try { await priyoPage.close(); } catch {}
-
     // Sisanya: device confirmation + Kiro consent (sama seperti Google flow)
     console.log(`[${label}] 6/6 Menunggu approval device & consent (max 120s)...`);
     const maxWait = 120000;
@@ -1783,7 +1749,7 @@ async function automateKiroEmailLogin(config, deviceData, account) {
     }
   }
 
-  // Return resolved email (priyo address) agar dipakai untuk rename connection
+  // Return resolved email (alias) agar dipakai untuk rename connection
   return { approved, email: resolvedEmail };
 }
 
@@ -1868,6 +1834,12 @@ async function batchFromFile(config, filePath) {
     return;
   }
 
+  await runBatch(config, accounts, () => 3000 + Math.random() * 5000);
+}
+
+// Loop proses beberapa account. `delay` bisa angka (ms) atau fungsi (idx) -> ms.
+// Dipakai oleh batchFromFile (delay random) dan interactiveRun (delay tetap).
+async function runBatch(config, accounts, delay = 5000) {
   console.log(`\nMemproses ${accounts.length} akun...\n`);
   let success = 0;
   let failed = 0;
@@ -1877,19 +1849,166 @@ async function batchFromFile(config, filePath) {
       await processAccount(config, accounts[i]);
       success++;
     } catch (err) {
-      console.error(`Gagal: ${err.message}`);
+      console.error(`❌ Gagal: ${err.message}`);
       failed++;
     }
 
     if (i < accounts.length - 1) {
-      const delay = 3000 + Math.random() * 5000;
-      console.log(`\nMenunggu ${Math.round(delay / 1000)} detik sebelum akun berikutnya...`);
-      await new Promise((r) => setTimeout(r, delay));
+      const d = typeof delay === "function" ? delay(i) : delay;
+      if (d > 0) {
+        console.log(`\nMenunggu ${Math.round(d / 1000)} detik sebelum akun berikutnya...`);
+        await new Promise((r) => setTimeout(r, d));
+      }
     }
   }
 
   console.log(`\n${"=".repeat(60)}`);
   console.log(`SELESAI: ${success} sukses, ${failed} gagal dari ${accounts.length} akun`);
+}
+
+// ============================================================
+// INTERACTIVE PROMPTS
+// ============================================================
+// Prompt teks biasa. `def` = nilai default (Enter untuk pakai default).
+// ============================================================
+// INTERACTIVE PROMPTS
+// ============================================================
+// Semua prompt memakai SATU instance readline bersama (`rl`) yang dibuat
+// sekali di interactiveRun. Membuat & menutup readline per-pertanyaan bikin
+// stdin bermasalah (terutama saat input cepat / pipe), jadi kita reuse.
+
+// Prompt teks biasa. `def` = nilai default (Enter untuk pakai default).
+function askPrompt(rl, query, def) {
+  return new Promise((resolve) => {
+    const prompt = def !== undefined && def !== "" ? `${query} [${def}]: ` : `${query}: `;
+    rl.question(prompt, (ans) => {
+      const v = (ans || "").trim();
+      resolve(v === "" && def !== undefined ? String(def) : v);
+    });
+  });
+}
+
+// Prompt angka positif. Kembali ke `def` kalau input invalid.
+async function askNumber(rl, query, def) {
+  const v = await askPrompt(rl, query, def);
+  const n = parseInt(v, 10);
+  if (Number.isFinite(n) && n > 0) return n;
+  const dn = parseInt(def, 10);
+  return Number.isFinite(dn) && dn > 0 ? dn : 0;
+}
+
+// Prompt password dengan masking (tampil sebagai *). Pakai raw mode stdin
+// supaya password tidak terlihat. `rl` di-pause dulu supaya tidak berebut
+// stdin, lalu di-resume setelah selesai. Fallback visible kalau bukan TTY.
+function askPassword(rl, query) {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY || typeof stdin.setRawMode !== "function") {
+      rl.question(`${query}(visible) `, (ans) => resolve((ans || "").trim()));
+      return;
+    }
+    rl.pause();
+    let value = "";
+    process.stdout.write(query);
+    stdin.setRawMode(true);
+    stdin.resume();
+    const onData = (buf) => {
+      for (const ch of buf.toString("utf8")) {
+        const code = ch.charCodeAt(0);
+        if (ch === "\r" || ch === "\n") {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.removeListener("data", onData);
+          process.stdout.write("\n");
+          rl.resume();
+          return resolve(value);
+        }
+        if (code === 3) { // Ctrl-C
+          process.stdout.write("\n");
+          process.exit(0);
+        }
+        if (code === 127 || code === 8) { // backspace
+          if (value.length) {
+            value = value.slice(0, -1);
+            process.stdout.write("\b \b");
+          }
+          continue;
+        }
+        if (code < 32) continue; // abaikan control char lain
+        value += ch;
+        process.stdout.write("*");
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+// ============================================================
+// INTERACTIVE RUN
+// ============================================================
+// Mode interaktif: pilih mode (email/google), loop N kali, konfirmasi, jalankan.
+async function interactiveRun(config) {
+  if (!process.stdout.isTTY) {
+    console.log("Mode interaktif butuh terminal (TTY). Untuk non-interaktif: node bot.js add <accounts.json>");
+    return;
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log("\n🤖 9router Kiro Bot — Mode Interaktif\n");
+    console.log("Pilih mode registrasi:");
+    console.log("  1) Email via priyo.email   → akun AWS Builder ID baru, otomatis");
+    console.log("  2) Google OAuth            → butuh email + password Google");
+    const modeChoice = await askPrompt(rl, "Pilih [1/2]", "1");
+    const method = modeChoice === "2" ? "google" : "email";
+
+    const count = await askNumber(rl, "Loop berapa kali (jumlah akun)?", "1");
+
+    const accounts = [];
+    if (method === "email") {
+      const prefix = await askPrompt(rl, "Prefix username priyo? (kosong = random tiap akun)", "");
+      const customName = await askPrompt(rl, "Nama tampilan AWS? (kosong = random realistis)", "");
+      for (let i = 0; i < count; i++) {
+        const acc = { method: "email" };
+        if (prefix) {
+          // prefix + nomor urut, validasi 3-15 char alfanumerik
+          let u = `${prefix}${count > 1 ? i + 1 : ""}`.toLowerCase().replace(/[^a-z0-9.]/g, "");
+          if (u.length < 3) u = (u + Math.random().toString(36).slice(2, 6)).slice(0, 15);
+          acc.priyoUsername = u.slice(0, 15);
+        }
+        if (customName) acc.name = customName;
+        accounts.push(acc);
+      }
+    } else {
+      if (count > 1) console.log(`\nMasukkan ${count} akun Google (email + password masing-masing):`);
+      for (let i = 0; i < count; i++) {
+        const tag = count > 1 ? `[${i + 1}/${count}] ` : "";
+        const email = await askPrompt(rl, `${tag}Email Google`);
+        if (!email) { console.log("⚠️  Email kosong, skip akun ini."); continue; }
+        const password = await askPassword(rl, `${tag}Password Google: `);
+        if (!password) { console.log("⚠️  Password kosong, skip akun ini."); continue; }
+        accounts.push({ method: "google", email, password });
+      }
+      if (accounts.length === 0) {
+        console.log("Tidak ada akun Google valid. Batal.");
+        return;
+      }
+    }
+
+    const delaySec = await askNumber(rl, "Jeda antar akun (detik)?", "5");
+
+    console.log(`\n📋 Rencana: ${accounts.length} akun | mode=${method} | jeda=${delaySec}s`);
+    const go = (await askPrompt(rl, "Lanjutkan? [y/N]", "n")).toLowerCase();
+    if (go !== "y" && go !== "yes") {
+      console.log("Dibatalkan.");
+      return;
+    }
+
+    rl.close();
+    await runBatch(config, accounts, delaySec * 1000);
+  } finally {
+    try { rl.close(); } catch {}
+  }
 }
 
 // ============================================================
@@ -1959,20 +2078,21 @@ async function deleteAccountCmd(config, id) {
   console.log(`✅ Deleted: ${result.deleted} account(s)`);
 }
 
-async function main() {
-  const argv = process.argv.slice(2);
-  const { positional, flags } = parseCliFlags(argv);
-  const command = positional[0];
-
-  if (!command) {
-    console.log(`
+function printHelp() {
+  console.log(`
 9router Kiro Bot — Automasi registrasi akun Kiro AI
 
 Usage:
+  node bot.js                                    # mode interaktif (pilih mode + loop) [TTY]
+  node bot.js interactive                        # mode interaktif (sama dengan di atas)
   node bot.js add <email> <password> [flags]      # daftar 1 akun via Google OAuth
   node bot.js add <accounts.json> [flags]         # batch dari file JSON
   node bot.js inspect [flags]                     # lihat akun Kiro terdaftar
   node bot.js delete <id> [flags]                 # hapus akun
+  node bot.js help                                # tampilkan bantuan ini
+
+Mode interaktif memandu kamu pilih mode (email/google), jumlah loop,
+opsi tiap mode, jeda antar akun, lalu konfirmasi sebelum jalan.
 
 Method per akun di batch JSON (field 'method'):
   - "google" (default) — butuh email + password Google
@@ -1995,19 +2115,43 @@ Config flags (CLI > env > config.json > default):
   --chromium / NINEROUTER_CHROMIUM  default /usr/bin/chromium
 
 Examples:
+  # Interactive (pilih mode + loop):
+  node bot.js interactive
   # Remote HTTPS VPS:
-  node bot.js add txn1@fvcksuite.com 'your-google-password' --host <your-9router-host> --proto https --password '<dashboard-password>'
+  node bot.js add txn1@fvcksuite.com 'your-google-password' --host your-9router-host --proto https --password '<dashboard-password>'
   # Local:
   node bot.js add txn1@fvcksuite.com 'your-google-password'
   # Batch JSON (campuran Google + email via priyo):
   node bot.js add accounts.json
 `);
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const { positional, flags } = parseCliFlags(argv);
+  const command = positional[0];
+
+  if (command === "help" || command === "--help" || command === "-h") {
+    printHelp();
     return;
   }
 
   const config = await loadConfig(argv);
 
   switch (command) {
+    case undefined:
+      // Tanpa argumen: interactive kalau TTY, kalau tidak tampilkan help.
+      if (process.stdout.isTTY) {
+        await interactiveRun(config);
+      } else {
+        printHelp();
+      }
+      break;
+    case "interactive":
+    case "run":
+    case "wizard":
+      await interactiveRun(config);
+      break;
     case "add":
     case "browser": {
       const arg2 = positional[1];
@@ -2036,7 +2180,7 @@ Examples:
       break;
     }
     default:
-      console.log(`Unknown command: ${command}`);
+      console.log(`Unknown command: ${command}. Coba: node bot.js help`);
   }
 }
 
