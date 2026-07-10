@@ -902,7 +902,10 @@ async function automateKiroEmailLogin(config, deviceData, account) {
         await page.focus(sel).catch(() => {});
         await page.keyboard.type(userName, { delay: 40 });
       }
-      await new Promise((r) => setTimeout(r, 800));
+      // AWS SPA butuh waktu register input + enable Continue button. Klik
+      // terlalu cepat = ERR-837 ("Sorry, there was an error processing your
+      // request") karena form dikirim dengan state kosong/incomplete.
+      await new Promise((r) => setTimeout(r, 3000));
       const clickResult = await clickByText(page, ["Next", "Continue", "Send code", "Submit", "Create account"]);
       console.log(`[${label}]    Name submit click result: ${clickResult || "(none, falling back to Enter)"}`);
       if (!clickResult) await page.keyboard.press("Enter");
