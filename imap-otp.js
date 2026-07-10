@@ -117,13 +117,20 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
   const useGmraw = !!(
     client.capabilities && client.capabilities.has && client.capabilities.has("X-GM-EXT-1")
   );
-  const folders = useGmraw
-    ? ["INBOX"]
-    : ["INBOX", await findSpamPath(client)];
+  // PENTING: `in:anywhere` di X-GM-RAW tidak benar-benar bypass mailbox
+  // scope (E2E 2026-07-11). Setiap folder yang mau di-search harus di-lock
+  // dulu. Selalu search Spam juga — forwarder sering masuk Spam, dan
+  // `to:alias` IMAP search di folder Spam adalah safety net kalau server
+  // gak iklan X-GM-EXT-1.
+  const folders = ["INBOX", await findSpamPath(client)];
 
   const start = Date.now();
   try {
     while (Date.now() - start < maxWaitMs) {
+      const seen = new Set();
+      const messages = [];
+      let usedFallbackThisRound = false;
+
       for (const folder of folders) {
         const lock = await client.getMailboxLock(folder).catch(() => null);
         if (!lock) continue;
@@ -131,7 +138,7 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
           // Bangun daftar query: primary (to: alias), fallback (subject + sender)
           // untuk forwarder yang rewrite To header (mis. Firefox Relay).
           let queries;
-          if (useGmraw && folder === "INBOX") {
+          if (useGmraw) {
             queries = [
               { q: buildGmrawQuery(alias, subject), type: "to" },
               { q: buildGmrawFallbackQuery(subject), type: "fallback" },
@@ -153,17 +160,17 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
               break;
             }
           }
-          debug.usedFallback = debug.usedFallback || usedFallback;
+          if (usedFallback) usedFallbackThisRound = true;
 
           if (!uids || uids.length === 0) {
             if (!debug.searchedFolders.includes(folder)) debug.searchedFolders.push(folder);
             continue;
           }
           debug.matchCount = Math.max(debug.matchCount, uids.length);
-          // Ambil maks 3 terbaru untuk recency + extraction.
-          const recentUids = uids.slice(-3);
-          const messages = [];
-          for (const uid of recentUids) {
+
+          for (const uid of uids.slice(-3)) {
+            if (seen.has(uid)) continue;
+            seen.add(uid);
             const msg = await client.fetchOne(
               uid,
               { source: true, envelope: true, internalDate: true },
@@ -172,30 +179,40 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
             if (!msg) continue;
             messages.push({
               uid,
+              folder,
               source: msg.source ? msg.source.toString() : "",
               envelope: msg.envelope || {},
               internalDate: msg.internalDate ? new Date(msg.internalDate) : new Date(0),
             });
           }
-          const picked = pickRecencyMatch(messages, { since, slackMs });
-          if (picked) {
-            const { message, otp } = picked;
-            const result = {
-              ok: true,
-              otp,
-              from: formatFrom(message.envelope),
-              subject: (message.envelope && message.envelope.subject) || subject,
-              received: message.internalDate.toISOString(),
-              debug,
-            };
-            if (deleteAfterRead) {
-              try { await client.messageDelete(message.uid, { uid: true }); } catch {}
-            }
-            return result;
-          }
         } finally {
           try { lock.release(); } catch {}
         }
+      }
+      debug.usedFallback = debug.usedFallback || usedFallbackThisRound;
+
+      const picked = pickRecencyMatch(messages, { since, slackMs });
+      if (picked) {
+        const { message, otp } = picked;
+        const result = {
+          ok: true,
+          otp,
+          from: formatFrom(message.envelope),
+          subject: (message.envelope && message.envelope.subject) || subject,
+          received: message.internalDate.toISOString(),
+          debug,
+        };
+        if (deleteAfterRead && message.folder) {
+          // Butuh re-lock folder untuk delete (lock dilepas setiap round).
+          const lock = await client.getMailboxLock(message.folder).catch(() => null);
+          if (lock) {
+            try {
+              await client.messageDelete(message.uid, { uid: true });
+            } catch {}
+            try { lock.release(); } catch {}
+          }
+        }
+        return result;
       }
       await new Promise((r) => setTimeout(r, pollMs));
     }

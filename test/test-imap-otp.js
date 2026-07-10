@@ -144,6 +144,7 @@ test("getOtpViaImap: fallback path (To-rewrite) nemu OTP + debug.usedFallback", 
   let searchCalls = [];
   const fakeClient = {
     capabilities: new Set(["X-GM-EXT-1"]),
+    async list() { return [{ path: "INBOX", specialUse: "\\Inbox" }, { path: "[Gmail]/Spam", specialUse: "\\Junk" }]; },
     async getMailboxLock() { return { async release() {} }; },
     async search(criteria) {
       // Log query, return [] for "to:" (simulating Relay rewrite),
@@ -172,8 +173,60 @@ test("getOtpViaImap: fallback path (To-rewrite) nemu OTP + debug.usedFallback", 
   assert.equal(res.otp, "888222");
   assert.equal(deleted, 300);
   assert.equal(res.debug.usedFallback, true);
-  // Pastikan kedua query dipanggil
-  assert.equal(searchCalls.length, 2);
-  assert.ok(searchCalls[0].startsWith("to:abc@mozmail.com"));
-  assert.ok(searchCalls[1].startsWith("from:signin.aws"));
+  // 2 queries × 2 folders (INBOX + Spam) = 4 calls minimum. Both 'to:'
+  // dan 'from:' variants harus dipanggil.
+  assert.ok(searchCalls.length >= 4, `expected ≥4 search calls, got ${searchCalls.length}`);
+  assert.ok(searchCalls.some((q) => q.startsWith("to:abc@mozmail.com")));
+  assert.ok(searchCalls.some((q) => q.startsWith("from:signin.aws")));
+});
+
+test("getOtpViaImap: cari OTP di folder Spam (Relay kasus nyata)", async () => {
+  const since = Date.now() - 5000;
+  let deletedFolder = null;
+  let deletedUid = null;
+  const fakeClient = {
+    capabilities: new Set(["X-GM-EXT-1"]),
+    async list() { return [{ path: "INBOX", specialUse: "\\Inbox" }, { path: "[Gmail]/Spam", specialUse: "\\Junk" }]; },
+    lockedFolders: [],
+    async getMailboxLock(folder) {
+      this.lockedFolders.push(folder);
+      return { async release() {} };
+    },
+    async search(criteria) {
+      // Simulasikan: OTP ada di Spam (UID 22). INBOX tidak punya match.
+      const q = (criteria.gmraw || "") + "";
+      // INBOX selalu kosong (Spam-only message)
+      if (this.lastLockedFolder === "INBOX") return [];
+      // Spam return UID 22 untuk query apapun yang masuk akal
+      if (q.startsWith("from:") || q.startsWith("to:") || q.startsWith("subject:")) return [22];
+      return [];
+    },
+    async fetchOne(uid) {
+      return {
+        source: Buffer.from("verification code 493535"),
+        envelope: { subject: "Verify your AWS Builder ID email address", from: [{ address: "q5iy779mj@mozmail.com" }] },
+        internalDate: new Date(since + 3000),
+      };
+    },
+    async messageDelete(uid, opts) {
+      deletedUid = uid;
+      deletedFolder = this.lastLockedFolder;
+    },
+    lastLockedFolder: null,
+    async logout() {},
+  };
+  // Hack: track last locked via Proxy
+  const realLock = fakeClient.getMailboxLock.bind(fakeClient);
+  fakeClient.getMailboxLock = (f) => { fakeClient.lastLockedFolder = f; return realLock(f); };
+
+  const res = await getOtpViaImap(
+    { user: "u@gmail.com", password: "p", deleteAfterRead: true },
+    "q5iy779mj@mozmail.com",
+    { since, maxWaitMs: 1000, pollMs: 10, clientFactory: async () => fakeClient }
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.otp, "493535");
+  // OTP ditemukan di Spam dan dihapus dari Spam
+  assert.equal(deletedUid, 22);
+  assert.equal(deletedFolder, "[Gmail]/Spam");
 });
