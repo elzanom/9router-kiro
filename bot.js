@@ -827,6 +827,21 @@ async function automateKiroEmailLogin(config, deviceData, account) {
             const rect = inp.getBoundingClientRect ? inp.getBoundingClientRect() : { width: 0, height: 0 };
             const visible = rect.width > 0 && rect.height > 0;
             if (!visible) continue;
+            // Exclude input types yang tidak mungkin field nama — defensive
+            // terhadap email field yg attrs-nya kebetulan mengandung substring
+            // "name" (e.g. CSS class, aria-label). Tanpa ini, kita akan
+            // overwrite alias email dengan nama display → AWS kirim OTP ke
+            // email invalid → OTP timeout.
+            const inpType = (inp.getAttribute("type") || "").toLowerCase();
+            if (
+              inpType === "email" ||
+              inpType === "password" ||
+              inpType === "hidden" ||
+              inpType === "checkbox" ||
+              inpType === "radio" ||
+              inpType === "submit" ||
+              inpType === "button"
+            ) continue;
             const attrs = [
               inp.getAttribute("name") || "",
               inp.id || "",
