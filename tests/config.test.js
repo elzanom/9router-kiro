@@ -73,3 +73,30 @@ test("remote + https + non-localhost + password resolves", async () => {
   assert.equal(cfg.proto, "https");
   assert.equal(cfg.port, 443);
 });
+
+test("imap: flag user/password/host dipakai + default port/delete", async () => {
+  const cfg = await loadConfig(
+    ["--imap-user", "flag@gmail.com", "--imap-password", "flagpw", "--imap-host", "imap.gmail.com"],
+    { interactive: false }
+  );
+  assert.equal(cfg.imap.user, "flag@gmail.com");
+  assert.equal(cfg.imap.password, "flagpw");
+  assert.equal(cfg.imap.host, "imap.gmail.com");
+  assert.equal(cfg.imap.port, 993);
+  assert.equal(cfg.imap.deleteAfterRead, true);
+});
+
+test("imap: --no-delete-otp mematikan deleteAfterRead", async () => {
+  const cfg = await loadConfig(["--imap-user", "u", "--no-delete-otp"], { interactive: false });
+  assert.equal(cfg.imap.deleteAfterRead, false);
+});
+
+test("imap: env user menang (tanpa flag user)", async () => {
+  process.env.NINEROUTER_IMAP_USER = "env@gmail.com";
+  try {
+    const cfg = await loadConfig(["--imap-host", "imap.gmail.com"], { interactive: false });
+    assert.equal(cfg.imap.user, "env@gmail.com");
+  } finally {
+    delete process.env.NINEROUTER_IMAP_USER;
+  }
+});

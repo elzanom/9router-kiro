@@ -100,6 +100,25 @@ async function loadConfig(argv = process.argv.slice(2), { interactive = process.
     password: pick("password", "NINEROUTER_PASSWORD"),
   };
 
+  // IMAP (mode email: baca OTP dari Gmail via forwarder alias).
+  const imapFile = file.imap || {};
+  const pickImap = (flagKey, envKey, fileKey) => {
+    if (flags[flagKey] !== undefined && flags[flagKey] !== true) return String(flags[flagKey]);
+    if (process.env[envKey] !== undefined) return process.env[envKey];
+    if (imapFile[fileKey] !== undefined) return String(imapFile[fileKey]);
+    return undefined;
+  };
+  const noDelete = flags["no-delete-otp"] === true;
+  const fileDelete = imapFile.deleteAfterRead;
+  cfg.imap = {
+    host: pickImap("imap-host", "NINEROUTER_IMAP_HOST", "host") || "imap.gmail.com",
+    port: Number(pickImap("imap-port", "NINEROUTER_IMAP_PORT", "port") || 993),
+    user: pickImap("imap-user", "NINEROUTER_IMAP_USER", "user"),
+    password: pickImap("imap-password", "NINEROUTER_IMAP_PASSWORD", "password"),
+    tls: true,
+    deleteAfterRead: noDelete ? false : fileDelete !== undefined ? Boolean(fileDelete) : true,
+  };
+
   cfg.mode = resolveMode(cfg.mode, cfg);
 
   if (cfg.mode === "remote" && cfg.proto === "http" && !isLocalHost(cfg.host)) {
