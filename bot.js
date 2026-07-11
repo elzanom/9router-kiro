@@ -29,6 +29,7 @@ const { loadConfig, parseCliFlags } = require("./config");
 const { resolveAuthHeaders } = require("./auth");
 const { request } = require("./http-client");
 const { getOtpViaImap } = require("./imap-otp");
+const { loadProxies, getProxyForAccount, chromiumArgsForProxy } = require("./proxy");
 
 // ============================================================
 // 9ROUTER API
@@ -310,21 +311,36 @@ function randomRealisticName() {
   return `${first} ${last}`;
 }
 
-async function launchStealthBrowser(config) {
+async function launchStealthBrowser(config, proxy = null) {
+  const args = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-blink-features=AutomationControlled",
+    "--window-size=1280,900",
+  ];
+  if (proxy) {
+    args.push(...chromiumArgsForProxy(proxy));
+  }
   const browser = await puppeteerExtra.launch({
     executablePath: config.chromiumPath,
     headless: false,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-blink-features=AutomationControlled",
-      "--window-size=1280,900",
-    ],
+    args,
   });
   return browser;
 }
 
-async function newStealthPage(browser) {
+// Untuk proxy dengan auth (user+pass), panggil setelah launch + newPage.
+// Chromium --proxy-server args gak bisa kirim creds langsung di CLI — creds
+// harus di-set di tiap page via page.authenticate().
+async function authenticatePageProxy(page, proxy) {
+  if (!proxy || !proxy.username) return;
+  await page.authenticate({
+    username: proxy.username,
+    password: proxy.password || "",
+  });
+}
+
+async function newStealthPage(browser, proxy = null) {
   const page = await browser.newPage();
   await page.setUserAgent(
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
@@ -332,6 +348,10 @@ async function newStealthPage(browser) {
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
   });
+  if (proxy && proxy.username) {
+    // Chromium --proxy-server arg gak kirim auth; butuh set per page.
+    await page.authenticate({ username: proxy.username, password: proxy.password || "" });
+  }
   return page;
 }
 
@@ -591,7 +611,7 @@ async function automateKiroGoogleLogin(config, email, password, deviceData) {
 // ============================================================
 // KIRO OAUTH AUTOMATION (Alias forwarder + AWS email sign-in)
 // ============================================================
-async function automateKiroEmailLogin(config, deviceData, account) {
+async function automateKiroEmailLogin(config, deviceData, account, currentProxy = null) {
   const alias = account.email;
   if (!alias || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(alias)) {
     throw new Error(
@@ -600,8 +620,11 @@ async function automateKiroEmailLogin(config, deviceData, account) {
   }
   const label = alias;
   console.log(`\n[${label}] Memulai Kiro OAuth flow (email via alias forwarder + IMAP)...`);
+  if (currentProxy) {
+    console.log(`[${label}]    Proxy: ${currentProxy.protocol}://${currentProxy.host}:${currentProxy.port}${currentProxy.username ? ` (auth)` : ""}`);
+  }
 
-  const browser = await launchStealthBrowser(config);
+  const browser = await launchStealthBrowser(config, currentProxy);
   let approved = false;
   let resolvedEmail = alias;
   let submitTime = 0;
@@ -1375,7 +1398,7 @@ async function pollUntilConnected(config, deviceData, email) {
 // ============================================================
 // BATCH
 // ============================================================
-async function processAccount(config, account) {
+async function processAccount(config, account, currentProxy = null) {
   const method = (account.method || "google").toLowerCase();
   const label = account.email || `account-${Date.now()}`;
   console.log(`\n${"=".repeat(60)}`);
@@ -1401,7 +1424,7 @@ async function processAccount(config, account) {
         "Method 'email' butuh config IMAP (user + password). Isi block 'imap' di config.json atau --imap-user/--imap-password."
       );
     }
-    const result = await automateKiroEmailLogin(config, deviceData, account);
+    const result = await automateKiroEmailLogin(config, deviceData, account, currentProxy);
     resolvedEmail = result.email || account.email || label;
   } else {
     throw new Error(`Method tidak dikenal: ${method} (pakai 'google' atau 'email')`);
@@ -1425,12 +1448,19 @@ async function batchFromFile(config, filePath) {
 // Dipakai oleh batchFromFile (delay random) dan interactiveRun (delay tetap).
 async function runBatch(config, accounts, delay = 5000) {
   console.log(`\nMemproses ${accounts.length} akun...\n`);
+  // Load proxy pool (file atau optional API rotator di masa depan).
+  // Pool boleh kosong → tidak ada proxy (direct).
+  const proxies = loadProxies(config.proxyFile || "proxies.txt");
+  if (proxies.length > 0) {
+    console.log(`[batch] Proxy pool: ${proxies.length} entries (cycle per akun)`);
+  }
   let success = 0;
   let failed = 0;
 
   for (let i = 0; i < accounts.length; i++) {
+    const currentProxy = getProxyForAccount(proxies, i);
     try {
-      await processAccount(config, accounts[i]);
+      await processAccount(config, accounts[i], currentProxy);
       success++;
     } catch (err) {
       console.error(`❌ Gagal: ${err.message}`);
