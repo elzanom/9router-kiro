@@ -1838,7 +1838,11 @@ async function main() {
         const acc = { method: "email", email: arg2 };
         if (arg3) acc.password = arg3;
         if (flags.name && flags.name !== true) acc.name = String(flags.name);
-        await processAccount(config, acc);
+        // Single-akun juga pakai fingerprint random (seed dari email hash
+        // + epoch minute) supaya retry beda fingerprint tiap kali.
+        const fpSeed = (acc.email || "").split("").reduce((a, c) => a + c.charCodeAt(0), 0) + Math.floor(Date.now() / 60000);
+        const fp = generateFingerprint(fpSeed);
+        await processAccount(config, acc, null, fp);
       } else if (arg2 && arg3) {
         await processAccount(config, { email: arg2, password: arg3 });
       } else if (arg2 && fs.existsSync(arg2)) {
