@@ -23,21 +23,48 @@
 const fs = require("fs");
 const path = require("path");
 
-// Random local-part, default 10 char alphanumeric (62^10 ≈ 8.4e17 options).
-function randomLocalPart(len = 10) {
-  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let out = "";
-  for (let i = 0; i < len; i++) {
-    out += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return out;
+// Local-part generator — menghasilkan alias yang terlihat seperti nama
+// manusia sungguhan (mis. "emma.walker37" bukan "5w0kuqx05p"). Pola: kata
+// dari dict (nama depan) + kata keluarga + angka 1-99. Lebih terlihat
+// natural untuk AWS fingerprint (which counts alias-like email addresses
+// as "looks like real user" signal).
+//
+// `len` diabaikan (dipertahankan untuk backward-compat dengan CLI signature).
+const FIRST_WORDS = [
+  "emma", "liam", "olivia", "noah", "ava", "sophia", "mason", "isabella",
+  "lucas", "mia", "logan", "harper", "ethan", "amelia", "james", "ella",
+  "henry", "scarlett", "benjamin", "grace", "sebastian", "lily", "owen",
+  "elena", "jack", "aria", "leo", "nora", "caleb", "ruby", "ryan",
+  "sophie", "daniel", "claire", "matthew", "sarah", "andrew", "anna",
+  "david", "emma", "chris", "kate", "tom", "liz", "mark", "amy",
+  "paul", "jane", "alex", "kim", "luke", "may",
+];
+
+const LAST_WORDS = [
+  "walker", "turner", "hall", "king", "wright", "lopez", "hill", "green",
+  "adams", "baker", "clark", "davis", "evans", "ford", "garcia", "harris",
+  "irwin", "jones", "kelly", "lewis", "miller", "nash", "owen", "perry",
+  "quinn", "reed", "scott", "taylor", "underwood", "vega", "ward", "young",
+  "zimmer", "carter", "fisher", "hughes", "jenkins", "knight", "lawson",
+  "morris", "nelson", "palmer", "rice", "spencer", "tucker", "walsh",
+];
+
+function randomLocalPart() {
+  const first = FIRST_WORDS[Math.floor(Math.random() * FIRST_WORDS.length)];
+  const last = LAST_WORDS[Math.floor(Math.random() * LAST_WORDS.length)];
+  const num = Math.floor(Math.random() * 90) + 10; // 10-99
+  // 2 format yang dipakai keduanya: "emma.walker37" dan "emmaw37" — dipilih
+  // random supaya gak semua alias punya struktur sama.
+  if (Math.random() < 0.5) return `${first}.${last}${num}`;
+  return `${first.slice(0, 4)}${last.slice(0, 2)}${num}`;
 }
 
-// Generate N random aliases di domain.
-function generateAliases(domain, count = 1, len = 10) {
+// Generate N random aliases di domain. Local-part pakai format
+// name-like (lihat randomLocalPart).
+function generateAliases(domain, count = 1) {
   const out = [];
   for (let i = 0; i < count; i++) {
-    out.push(`${randomLocalPart(len)}@${domain}`);
+    out.push(`${randomLocalPart()}@${domain}`);
   }
   return out;
 }

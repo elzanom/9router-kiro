@@ -6,29 +6,28 @@ const os = require("os");
 const path = require("path");
 const { randomLocalPart, generateAliases, appendAliasesToFile } = require("../cloudflare-routing.js");
 
-test("randomLocalPart: default length 10", () => {
-  const p = randomLocalPart();
-  assert.equal(p.length, 10);
-  assert.match(p, /^[a-z0-9]+$/);
+test("randomLocalPart: name-like format (word + word + digits)", () => {
+  for (let i = 0; i < 50; i++) {
+    const p = randomLocalPart();
+    // Format: "<first>[.<last>]<num>" dengan num 10-99
+    assert.match(p, /^[a-z]+(\.[a-z]+)?[1-9][0-9]$/);
+    assert.ok(p.length >= 6 && p.length <= 30);
+  }
 });
 
-test("randomLocalPart: custom length", () => {
-  assert.equal(randomLocalPart(8).length, 8);
-  assert.equal(randomLocalPart(15).length, 15);
-});
-
-test("generateAliases: count + format", () => {
-  const list = generateAliases("minom.my.id", 5, 10);
+test("generateAliases: count + email format", () => {
+  const list = generateAliases("minom.my.id", 5);
   assert.equal(list.length, 5);
   for (const a of list) {
-    assert.match(a, /^[a-z0-9]{10}@minom\.my\.id$/);
+    assert.match(a, /^[^@]+@minom\.my\.id$/);
   }
 });
 
 test("generateAliases: 100 aliases unik (probabilistic check)", () => {
-  const list = generateAliases("minom.my.id", 100, 10);
+  const list = generateAliases("minom.my.id", 100);
   const uniq = new Set(list);
-  // 62^10 collision probability untuk 100 elemen sangat rendah.
+  // Dict kecil (50 first × 50 last × 90 num = 225k + 2 format = 450k
+  // possible local parts). Collision untuk 100 elemen sangat rendah.
   assert.equal(uniq.size, list.length);
 });
 

@@ -120,6 +120,55 @@ function safeUrl(page) {
   }
 }
 
+// Multi-language button text translations. Pakai `lang(...)` untuk expand
+// array EN ke ["Continue", "Continuar", "Continuer", "Weiter", ...] supaya
+// AWS CloudScape dalam bahasa apapun (es/pt/fr/de/jp/dll) tetap ke-match.
+const LANG_BUTTONS = {
+  // "Continue" → EN + es + pt + fr + de + it + jp + zh
+  Continue: ["Continuar", "Continuar", "Continuer", "Weiter", "Continua", "続行", "继续"],
+  // "Next" → es + fr + de
+  Next: ["Siguiente", "Suivant", "Weiter"],
+  // "Allow access" → es + fr
+  "Allow access": ["Permitir acceso", "Autoriser l'accès", "Acceso permitido"],
+  Allow: ["Permitir", "Autoriser", "Erlauben", "許可", "允许"],
+  // "Confirm and continue" → es + pt + fr + de
+  "Confirm and continue": ["Confirmar y continuar", "Confirmar e continuar", "Confirmer et continuer", "Bestätigen und fortfahren"],
+  // "Create account" → es + pt + fr + de
+  "Create account": ["Crear cuenta", "Criar conta", "Créer un compte", "Konto erstellen"],
+  // "Sign up" → es + pt + fr + de
+  "Sign up": ["Registrarse", "Inscrever-se", "S'inscrire", "Registrieren"],
+  Submit: ["Enviar", "Envoyer", "Senden", "送信", "提交"],
+  // "Send code" → es + fr
+  "Send code": ["Enviar código", "Envoyer le code", "Code senden"],
+};
+// Perluas array EN jadi multi-lang. Idempotent: kalau teks sudah multi-lang
+// tetap diproses dengan benar (substring match).
+function lang(arr) {
+  const out = [];
+  for (const t of arr) {
+    out.push(t);
+    if (LANG_BUTTONS[t]) {
+      for (const tl of LANG_BUTTONS[t]) {
+        if (!out.includes(tl)) out.push(tl);
+      }
+    }
+  }
+  return out;
+}
+
+// React-compatible value setter untuk input. Tanpa ini, type via Puppeteer
+// kadang gak trigger React onChange handler (React pakai synthetic event,
+// bukan native input event). Panggil dari page.evaluate().
+async function reactTypeInput(handle, value) {
+  await handle.evaluate((el, v) => {
+    const proto = Object.getPrototypeOf(el);
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) desc.set.call(el, v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
 async function clickByText(page, texts) {
   return page.evaluate((targets) => {
     const all = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"], input[type="submit"], span'));
@@ -1153,26 +1202,28 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
       // Isi SEMUA field password visible (password + confirm) pakai element
       // handle langsung. page.focus(selector) sering gagal untuk AWS custom
       // form fields, tapi handle.click() + handle.type() reliable.
-      // Loop beberapa kali karena confirm field bisa muncul belakangan.
+      // Pakai reactTypeInput (native value setter + input event) supaya
+      // React onChange handler trigger — handle.type() biasa kadang gak
+      // propagate ke controlled component AWS CloudScape, sehingga
+      // password dan confirm gak sinkron dan AWS tolak dengan error
+      // "Las contraseñas deben coincidir" / "Passwords do not match".
       for (let attempt = 0; attempt < 3; attempt++) {
         await focusPage(page);
         const handles = await page.$$('input[type="password"]');
         let allFilled = true;
         for (const h of handles) {
-          // Cek apakah field ini visible
           const vis = await h.evaluate((el) => {
             const r = el.getBoundingClientRect();
             return r.width > 0 && r.height > 0;
           }).catch(() => false);
           if (!vis) continue;
           const curLen = await h.evaluate((el) => (el.value || "").length).catch(() => 0);
-          if (curLen > 0) continue; // sudah terisi
+          if (curLen > 0) continue;
           allFilled = false;
-          // Select-all + replace supaya bersih, lalu ketik
           await h.click({ clickCount: 3 }).catch(() => {});
           await new Promise((r) => setTimeout(r, 150));
-          await h.type(pwd, { delay: 40 }).catch(() => {});
-          await new Promise((r) => setTimeout(r, 350));
+          await reactTypeInput(h, pwd);
+          await new Promise((r) => setTimeout(r, 400));
         }
         if (allFilled) break;
         await new Promise((r) => setTimeout(r, 700));
@@ -1222,7 +1273,7 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
         console.log(`[${label}]    Password submit (mouse click): ${pwdClicked}`);
       } else {
         console.log(`[${label}]    Password submit via fallback (button mungkin disabled)`);
-        await clickByText(page, ["Create account", "Continue", "Next", "Submit"]);
+        await clickByText(page, lang(["Create account", "Continue", "Next", "Submit"]));
         await page.keyboard.press("Enter");
       }
       await new Promise((r) => setTimeout(r, 4500));
@@ -1256,6 +1307,7 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
     const checkInterval = 3000;
     let waited = 0;
     let lastLogUrl = "";
+    let stableCount = 0;
 
     while (waited < maxWait) {
       await focusPage(page);
@@ -1265,6 +1317,15 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
       if (url !== lastLogUrl) {
         console.log(`[${label}]    URL: ${url.slice(0, 100)}`);
         lastLogUrl = url;
+        stableCount = 0;
+      } else {
+        stableCount++;
+        // Kalau URL + click pattern stabil >5 cycle (15s) dan kita sudah
+        // mencoba klik, kemungkinan page stuck (form invalid). Throw agar
+        // batch lanjut ke akun berikutnya.
+        if (stableCount > 5 && sel === null) {
+          throw new Error(`Stuck di ${url.slice(0, 60)} selama ${stableCount * checkInterval / 1000}s — page tidak responsif`);
+        }
       }
 
       let sel = null;
@@ -1298,27 +1359,27 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
             if (curLen > 0) continue;
             await h.click({ clickCount: 3 }).catch(() => {});
             await new Promise((r) => setTimeout(r, 150));
-            await h.type(pwd2, { delay: 40 }).catch(() => {});
+            await reactTypeInput(h, pwd2);
           }
-          await new Promise((r) => setTimeout(r, 1000));
-          sel = await clickByText(page, ["Create account", "Continue", "Next", "Sign up"]);
+          await new Promise((r) => setTimeout(r, 1500));
+          sel = await clickByText(page, lang(["Create account", "Continue", "Sign up", "Next"]));
           if (!sel) sel = await clickPrimaryButton(page);
         } else {
           // Registration page lain (button-only). Tekan tombol primary.
-          const clicked = await clickByText(page, [
+          const clicked = await clickByText(page, lang([
             "Continue", "Next", "Create account", "Sign up", "Allow access", "Allow",
-          ]);
+          ]));
           if (clicked) sel = clicked;
           else sel = await clickPrimaryButton(page);
         }
       } else if (body.includes("Authorization requested") || body.includes("Confirm this code")) {
         console.log(`[${label}]    Halaman konfirmasi device code terdeteksi`);
-        sel = await clickByText(page, ["Confirm and continue"]);
+        sel = await clickByText(page, lang(["Confirm and continue"]));
         if (!sel) sel = await clickBySelector(page, 'button[class*="primary" i]');
         if (!sel) sel = await clickPrimaryButton(page);
       } else if (body.includes("Allow kiro-oauth-client") || body.includes("access your data")) {
         console.log(`[${label}]    Halaman consent Kiro terdeteksi`);
-        sel = await clickByText(page, ["Allow access", "Allow"]);
+        sel = await clickByText(page, lang(["Allow access", "Allow"]));
         if (!sel) sel = await clickBySelector(page, 'button[class*="allow" i]');
         if (!sel) sel = await clickPrimaryButton(page);
       } else if (
@@ -1379,7 +1440,7 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
     }
 
     if (!approved) {
-      throw new Error("Timeout: Device tidak di-approve dalam 120s");
+      throw new Error(`Timeout: Device tidak di-approve dalam ${maxWait / 1000}s`);
     }
   } catch (err) {
     console.error(`[${label}] ❌ Gagal: ${err.message}`);
