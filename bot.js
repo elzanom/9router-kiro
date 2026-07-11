@@ -1129,7 +1129,7 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
     console.log(`[${label}] 5b/6 Cek field password AWS Builder ID...`);
     await focusPage(page);
     const pwdPwd = await page
-      .waitForSelector('input[type="password"]', { timeout: 25000, visible: true })
+      .waitForSelector('input[type="password"]', { timeout: 45000, visible: true })
       .catch(() => null);
     const passwordFields = await page.evaluate(() => {
       const pwdInputs = Array.from(document.querySelectorAll('input[type="password"]'));
@@ -1251,8 +1251,8 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
     }
 
     // Sisanya: device confirmation + Kiro consent (sama seperti Google flow)
-    console.log(`[${label}] 6/6 Menunggu approval device & consent (max 120s)...`);
-    const maxWait = 120000;
+    console.log(`[${label}] 6/6 Menunggu approval device & consent (max 150s)...`);
+    const maxWait = 150000;
     const checkInterval = 3000;
     let waited = 0;
     let lastLogUrl = "";
@@ -1269,7 +1269,49 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
 
       let sel = null;
 
-      if (body.includes("Authorization requested") || body.includes("Confirm this code")) {
+      // Step registrationCode kadang muncul sebelum device consent. AWS
+      // CloudScape pindah dari /device?user_code → /signup?registrationCode
+      // untuk invited account atau secondary auth. Detect by URL + cari
+      // password field atau Create Account button.
+      if (/signup|registrationCode/i.test(url)) {
+        const regState = await page.evaluate(() => {
+          const pwd = document.querySelector('input[type="password"]');
+          const inputs = Array.from(document.querySelectorAll("input")).filter(
+            (i) => i.getBoundingClientRect().width > 0 && i.type !== "hidden"
+          );
+          return {
+            hasPwd: !!pwd,
+            inputCount: inputs.length,
+            inputs: inputs.slice(0, 5).map((i) => ({ name: i.name, type: i.type, placeholder: i.placeholder })),
+          };
+        }).catch(() => null);
+        if (regState && regState.hasPwd) {
+          // Password page muncul di step 6 (kalau step 5b tidak menunggu
+          // cukup lama). Isi password sekarang dan lanjut.
+          console.log(`[${label}]    Registration code page dengan password field terdeteksi (step 5b miss) — isi sekarang`);
+          const pwd2 = account.password || `Kiro${Math.random().toString(36).slice(2, 10)}!A1`;
+          const handles = await page.$$('input[type="password"]');
+          for (const h of handles) {
+            const vis = await h.evaluate((el) => el.getBoundingClientRect().width > 0).catch(() => false);
+            if (!vis) continue;
+            const curLen = await h.evaluate((el) => (el.value || "").length).catch(() => 0);
+            if (curLen > 0) continue;
+            await h.click({ clickCount: 3 }).catch(() => {});
+            await new Promise((r) => setTimeout(r, 150));
+            await h.type(pwd2, { delay: 40 }).catch(() => {});
+          }
+          await new Promise((r) => setTimeout(r, 1000));
+          sel = await clickByText(page, ["Create account", "Continue", "Next", "Sign up"]);
+          if (!sel) sel = await clickPrimaryButton(page);
+        } else {
+          // Registration page lain (button-only). Tekan tombol primary.
+          const clicked = await clickByText(page, [
+            "Continue", "Next", "Create account", "Sign up", "Allow access", "Allow",
+          ]);
+          if (clicked) sel = clicked;
+          else sel = await clickPrimaryButton(page);
+        }
+      } else if (body.includes("Authorization requested") || body.includes("Confirm this code")) {
         console.log(`[${label}]    Halaman konfirmasi device code terdeteksi`);
         sel = await clickByText(page, ["Confirm and continue"]);
         if (!sel) sel = await clickBySelector(page, 'button[class*="primary" i]');
