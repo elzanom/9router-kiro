@@ -32,6 +32,7 @@ const { getOtpViaImap } = require("./imap-otp");
 const { loadProxies, getProxyForAccount, chromiumArgsForProxy } = require("./proxy");
 const { domainOf, tryConsume, loadStats, saveStats, pruneOld, utcDateKey } = require("./quota");
 const { generateFingerprint } = require("./fingerprint");
+const { generateAliases, appendAliasesToFile } = require("./cloudflare-routing");
 
 // ============================================================
 // 9ROUTER API
@@ -1754,7 +1755,9 @@ function printHelp() {
 Usage:
   node bot.js                                    # mode interaktif (pilih mode + loop) [TTY]
   node bot.js interactive                        # mode interaktif (sama dengan di atas)
+  node bot.js gen <count> --domain <d>           # generate random forwarder aliases
   node bot.js add <email> <password> [flags]      # daftar 1 akun via Google OAuth
+  node bot.js add <alias> --method email          # daftar 1 akun via alias forwarder
   node bot.js add <accounts.json> [flags]         # batch dari file JSON
   node bot.js inspect [flags]                     # lihat akun Kiro terdaftar
   node bot.js delete <id> [flags]                 # hapus akun
@@ -1809,6 +1812,25 @@ async function main() {
 
   if (command === "help" || command === "--help" || command === "-h") {
     printHelp();
+    return;
+  }
+
+  // `gen <count>` — generate random forwarder aliases untuk domain sendiri
+  // (cloudflare email routing). Tidak perlu dashboard config.
+  if (command === "gen") {
+    const count = Number(positional[1]) || 10;
+    const domain = (flags.domain || "").replace(/^@/, "");
+    if (!domain) {
+      console.log("Usage: node bot.js gen <count> --domain <yourdomain.com>");
+      console.log("Contoh: node bot.js gen 30 --domain minom.my.id");
+      return;
+    }
+    const aliases = generateAliases(domain, count);
+    const filePath = flags.out || "aliases.txt";
+    const added = appendAliasesToFile(filePath, aliases);
+    console.log(`[gen] Generated ${aliases.length} aliases di ${domain}; ${added} baru ditambahkan ke ${filePath}`);
+    if (aliases.length > 0) console.log(aliases.slice(0, Math.min(5, aliases.length)).join("\n") + (aliases.length > 5 ? "\n..." : ""));
+    console.log(`\nPastikan Cloudflare Email Routing enabled + catch-all rule ke Gmail tujuan.`);
     return;
   }
 
