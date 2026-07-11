@@ -1706,20 +1706,196 @@ function askPassword(rl, query) {
 // INTERACTIVE RUN
 // ============================================================
 // Mode interaktif: pilih mode (email/google), loop N kali, konfirmasi, jalankan.
-async function interactiveRun(config) {
+// Menu interaktif utama — top-level dispatch. Loop sampai user pilih Exit
+// atau interrupt.
+async function interactiveMainMenu(config) {
+  if (!process.stdout.isTTY) {
+    console.log("Mode interaktif butuh terminal (TTY). Untuk non-interaktif: node bot.js add <accounts.json>");
+    return;
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      console.log("\n🤖 9router Kiro Bot — Menu Utama\n");
+      console.log("  1) Register akun (alias forwarder, OTP via IMAP Gmail)");
+      console.log("  2) Register akun (Google OAuth, butuh email + password Google)");
+      console.log("  3) Generate alias forwarder (CF Email Routing / manual)");
+      console.log("  4) Inspect akun terdaftar");
+      console.log("  5) Hapus akun (per ID)");
+      console.log("  6) Lihat / cek config (IMAP, proxy, quota)");
+      console.log("  7) Test IMAP connection (read Gmail inbox 5 terbaru)");
+      console.log("  8) Exit");
+      const choice = await askPrompt(rl, "Pilih [1-8]", "1");
+      const c = String(choice || "").trim();
+      if (c === "8" || c.toLowerCase() === "x" || c.toLowerCase() === "q") {
+        console.log("Bye.");
+        break;
+      }
+      try {
+        switch (c) {
+          case "1":
+            await interactiveRun(config, "email", rl);
+            break;
+          case "2":
+            await interactiveRun(config, "google", rl);
+            break;
+          case "3":
+            await interactiveGenerateAlias(rl);
+            break;
+          case "4":
+            await inspect(config);
+            break;
+          case "5": {
+            const id = await askPrompt(rl, "ID akun (atau prefix):", "");
+            if (id) await deleteAccountCmd(config, id.trim());
+            break;
+          }
+          case "6":
+            await interactiveShowConfig(config);
+            break;
+          case "7":
+            await interactiveTestImap(config);
+            break;
+          default:
+            console.log("Pilihan tidak dikenal. Coba lagi.");
+        }
+      } catch (err) {
+        console.error(`❌ Error: ${err.message}`);
+      }
+    }
+  } finally {
+    try { rl.close(); } catch {}
+  }
+}
+
+// Sub-menu 3: generate alias forwarder.
+async function interactiveGenerateAlias(rl) {
+  console.log("\n📧 Generate Alias Forwarder\n");
+  console.log("  1) Cloudflare Email Routing (domain sendiri, mis. minom.my.id)");
+  console.log("  2) Tulis manual ke aliases.txt");
+  console.log("  3) Kembali");
+  const choice = await askPrompt(rl, "Pilih [1-3]", "1");
+  if (choice === "3") return;
+  if (choice === "1") {
+    const domain = await askPrompt(rl, "Domain (tanpa @):", "minom.my.id");
+    if (!domain) return;
+    const count = Number(await askPrompt(rl, "Berapa banyak?", "5"));
+    const aliases = generateAliases(domain.replace(/^@/, ""), count);
+    const added = appendAliasesToFile("aliases.txt", aliases);
+    console.log(`[gen] ${count} alias digenerate, ${added} baru ditambahkan ke aliases.txt`);
+    if (aliases.length) {
+      console.log(aliases.slice(0, Math.min(5, aliases.length)).join("\n") + (aliases.length > 5 ? "\n..." : ""));
+    }
+    if (added === 0) console.log("(semua sudah ada di aliases.txt — dedupe aktif)");
+  } else if (choice === "2") {
+    const email = await askPrompt(rl, "Email forwarder (mis. abc@mozmail.com):", "");
+    if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      const added = appendAliasesToFile("aliases.txt", [email.trim()]);
+      console.log(added ? `✓ Ditambahkan: ${email.trim()}` : "Sudah ada di aliases.txt");
+    } else {
+      console.log("Format email gak valid.");
+    }
+  }
+}
+
+// Sub-menu 6: tampilkan config efektif.
+async function interactiveShowConfig(config) {
+  console.log("\n⚙️  Config Aktif\n");
+  console.log(`  Dashboard:    ${config.proto}://${config.host}:${config.port}  (mode=${config.mode})`);
+  console.log(`  Chromium:      ${config.chromiumPath}`);
+  if (config.imap) {
+    const imapMask = config.imap.password ? `${config.imap.password.slice(0, 2)}***` : "(unset)";
+    console.log(`  IMAP:         ${config.imap.host}:${config.imap.port}  user=${config.imap.user || "(unset)"}  pass=${imapMask}`);
+    console.log(`  deleteAfterRead: ${config.imap.deleteAfterRead}`);
+  } else {
+    console.log("  IMAP:         (tidak dikonfigurasi)");
+  }
+  console.log(`  Quota:        ${config.quota ? config.quota.perDomainPerDay : 10} per domain per UTC day`);
+  console.log(`  Stats file:   ${config.statsFile || ".batch-stats.json"}`);
+  console.log(`  Proxy file:   ${config.proxyFile || "proxies.txt"}`);
+  const proxyCount = loadProxies(config.proxyFile || "proxies.txt").length;
+  console.log(`  Proxy pool:   ${proxyCount} entries`);
+  // Tampilkan stats hari ini
+  const stats = loadStats(config.statsFile || ".batch-stats.json");
+  const today = utcDateKey();
+  if (stats[today] && Object.keys(stats[today]).length > 0) {
+    console.log(`\n  📊 Quota hari ini (${today}):`);
+    for (const [d, c] of Object.entries(stats[today])) {
+      console.log(`     ${d}: ${c}/${config.quota ? config.quota.perDomainPerDay : 10}`);
+    }
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  await askPrompt(rl, "\nEnter untuk kembali ke menu", "");
+  rl.close();
+}
+
+// Sub-menu 7: test IMAP connection — read 5 email terbaru dari Gmail.
+async function interactiveTestImap(config) {
+  console.log("\n📬 Test IMAP Connection\n");
+  if (!config.imap || !config.imap.user || !config.imap.password) {
+    console.log("❌ IMAP belum dikonfigurasi di config.json.");
+    const rl0 = readline.createInterface({ input: process.stdin, output: process.stdout });
+    await askPrompt(rl0, "Enter untuk kembali", "");
+    rl0.close();
+    return;
+  }
+  const { ImapFlow } = require("imapflow");
+  const c = new ImapFlow({
+    host: config.imap.host || "imap.gmail.com",
+    port: config.imap.port || 993,
+    secure: config.imap.tls !== false,
+    auth: { user: config.imap.user, pass: config.imap.password },
+    logger: false,
+  });
+  try {
+    await c.connect();
+    console.log(`✓ Connect ke ${config.imap.host}:${config.imap.port} sukses`);
+    console.log(`  X-GM-EXT-1: ${c.capabilities.has("X-GM-EXT-1") ? "yes" : "no"}`);
+    const lock = await c.getMailboxLock("INBOX");
+    try {
+      const r = await c.search({ all: true }, { uid: true });
+      console.log(`  INBOX: ${r.length} total`);
+      const recent = (r || []).slice(-5).reverse();
+      for (const uid of recent) {
+        const m = await c.fetchOne(uid, { envelope: true, internalDate: true }, { uid: true });
+        const e = m.envelope || {};
+        console.log(`    UID ${uid} [${m.internalDate ? m.internalDate.toISOString().slice(0, 19) : "?"}] ${(e.subject || "(no subject)").slice(0, 60)}  from=${(e.from && e.from[0] && e.from[0].address) || "?"}`);
+      }
+    } finally { try { lock.release(); } catch {} }
+    const spamLock = await c.getMailboxLock("[Gmail]/Spam");
+    try {
+      const sr = await c.search({ all: true }, { uid: true });
+      console.log(`  Spam: ${sr.length} total`);
+    } finally { try { spamLock.release(); } catch {} }
+    await c.logout();
+  } catch (e) {
+    console.error(`❌ ${e.message}`);
+  }
+  const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+  await askPrompt(rl2, "\nEnter untuk kembali", "");
+  rl2.close();
+}
+
+async function interactiveRun(config, forceMethod = null, parentRl = null) {
   if (!process.stdout.isTTY) {
     console.log("Mode interaktif butuh terminal (TTY). Untuk non-interaktif: node bot.js add <accounts.json>");
     return;
   }
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  // Pakai rl dari parent (interactiveMainMenu) supaya gak ada multiple
+  // readline instance yang konflik pada stdin.
+  const rl = parentRl || readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ownsRl = !parentRl;
   try {
     console.log("\n🤖 9router Kiro Bot — Mode Interaktif\n");
-    console.log("Pilih mode registrasi:");
-    console.log("  1) Email via alias forwarder  → akun AWS Builder ID baru (OTP via IMAP Gmail)");
-    console.log("  2) Google OAuth            → butuh email + password Google");
-    const modeChoice = await askPrompt(rl, "Pilih [1/2]", "1");
-    const method = modeChoice === "2" ? "google" : "email";
+    let method = forceMethod;
+    if (!method) {
+      console.log("Pilih mode registrasi:");
+      console.log("  1) Email via alias forwarder  → akun AWS Builder ID baru (OTP via IMAP Gmail)");
+      console.log("  2) Google OAuth            → butuh email + password Google");
+      const modeChoice = await askPrompt(rl, "Pilih [1/2]", "1");
+      method = modeChoice === "2" ? "google" : "email";
+    }
 
     const count = await askNumber(rl, "Loop berapa kali (jumlah akun)?", "1");
 
@@ -1777,10 +1953,10 @@ async function interactiveRun(config) {
       return;
     }
 
-    rl.close();
+    if (ownsRl) rl.close();
     await runBatch(config, accounts, delaySec * 1000);
   } finally {
-    try { rl.close(); } catch {}
+    if (ownsRl) try { rl.close(); } catch {}
   }
 }
 
@@ -1941,9 +2117,10 @@ async function main() {
 
   switch (command) {
     case undefined:
-      // Tanpa argumen: interactive kalau TTY, kalau tidak tampilkan help.
+      // Tanpa argumen: menu interaktif berlapis (recommended). Pakai --wizard
+      // untuk langsung ke flow register lama (back-compat).
       if (process.stdout.isTTY) {
-        await interactiveRun(config);
+        await interactiveMainMenu(config);
       } else {
         printHelp();
       }
@@ -1951,7 +2128,11 @@ async function main() {
     case "interactive":
     case "run":
     case "wizard":
+      // Back-compat: langsung ke flow register, bukan top-level menu.
       await interactiveRun(config);
+      break;
+    case "menu":
+      await interactiveMainMenu(config);
       break;
     case "add":
     case "browser": {
