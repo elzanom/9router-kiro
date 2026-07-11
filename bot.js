@@ -31,6 +31,7 @@ const { request } = require("./http-client");
 const { getOtpViaImap } = require("./imap-otp");
 const { loadProxies, getProxyForAccount, chromiumArgsForProxy } = require("./proxy");
 const { domainOf, tryConsume, loadStats, saveStats, pruneOld, utcDateKey } = require("./quota");
+const { generateFingerprint } = require("./fingerprint");
 
 // ============================================================
 // 9ROUTER API
@@ -312,12 +313,13 @@ function randomRealisticName() {
   return `${first} ${last}`;
 }
 
-async function launchStealthBrowser(config, proxy = null) {
+async function launchStealthBrowser(config, proxy = null, fingerprint = null) {
+  const fp = fingerprint || generateFingerprint();
   const args = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--disable-blink-features=AutomationControlled",
-    "--window-size=1280,900",
+    `--window-size=${fp.viewport.width},${fp.viewport.height}`,
   ];
   if (proxy) {
     args.push(...chromiumArgsForProxy(proxy));
@@ -330,27 +332,23 @@ async function launchStealthBrowser(config, proxy = null) {
   return browser;
 }
 
-// Untuk proxy dengan auth (user+pass), panggil setelah launch + newPage.
-// Chromium --proxy-server args gak bisa kirim creds langsung di CLI — creds
-// harus di-set di tiap page via page.authenticate().
-async function authenticatePageProxy(page, proxy) {
-  if (!proxy || !proxy.username) return;
-  await page.authenticate({
-    username: proxy.username,
-    password: proxy.password || "",
-  });
-}
-
-async function newStealthPage(browser, proxy = null) {
+async function newStealthPage(browser, proxy = null, fingerprint = null) {
+  const fp = fingerprint || generateFingerprint();
   const page = await browser.newPage();
-  await page.setUserAgent(
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
-  );
-  await page.evaluateOnNewDocument(() => {
+  await page.setUserAgent(fp.userAgent);
+  await page.setViewport({ width: fp.viewport.width, height: fp.viewport.height });
+  // Override navigator properties BEFORE any page script runs — supaya AWS
+  // fingerprint script yang load setelah page load tetap dapat nilai yang
+  // konsisten. Timezone sengaja gak di-override di level JS (akan bentrok
+  // dengan host TZ dari proxy IP). Sebagai gantinya, AWS fingerprint baca
+  // IP geolocation dari proxy address — konsisten.
+  await page.evaluateOnNewDocument((data) => {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
-  });
+    try { Object.defineProperty(navigator, "hardwareConcurrency", { get: () => data.hardwareConcurrency }); } catch {}
+    try { Object.defineProperty(navigator, "deviceMemory", { get: () => data.deviceMemory }); } catch {}
+    try { Object.defineProperty(navigator, "languages", { get: () => data.languages }); } catch {}
+  }, fp);
   if (proxy && proxy.username) {
-    // Chromium --proxy-server arg gak kirim auth; butuh set per page.
     await page.authenticate({ username: proxy.username, password: proxy.password || "" });
   }
   return page;
@@ -612,7 +610,7 @@ async function automateKiroGoogleLogin(config, email, password, deviceData) {
 // ============================================================
 // KIRO OAUTH AUTOMATION (Alias forwarder + AWS email sign-in)
 // ============================================================
-async function automateKiroEmailLogin(config, deviceData, account, currentProxy = null) {
+async function automateKiroEmailLogin(config, deviceData, account, currentProxy = null, fingerprint = null) {
   const alias = account.email;
   if (!alias || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(alias)) {
     throw new Error(
@@ -624,15 +622,20 @@ async function automateKiroEmailLogin(config, deviceData, account, currentProxy 
   if (currentProxy) {
     console.log(`[${label}]    Proxy: ${currentProxy.protocol}://${currentProxy.host}:${currentProxy.port}${currentProxy.username ? ` (auth)` : ""}`);
   }
+  if (fingerprint) {
+    console.log(`[${label}]    Fingerprint: ${fingerprint.viewport.width}x${fingerprint.viewport.height}, ${fingerprint.userAgent.match(/Chrome\/[\d.]+/)?.[0]}, ${fingerprint.timezoneId}`);
+  }
 
-  const browser = await launchStealthBrowser(config, currentProxy);
+  const browser = await launchStealthBrowser(config, currentProxy, fingerprint);
   let approved = false;
   let resolvedEmail = alias;
   let submitTime = 0;
 
   try {
     // Hanya 1 tab: AWS / Kiro flow. OTP dibaca via IMAP (imap-otp.js).
-    const page = await newStealthPage(browser);
+    // Pass fingerprint so newStealthPage override navigator properties
+    // (UA/viewport sudah dari launch args; navigator props di-override per-page).
+    const page = await newStealthPage(browser, currentProxy, fingerprint);
 
     console.log(`[${label}] 1/6 Membuka halaman verifikasi AWS...`);
     // Gunakan domcontentloaded (networkidle2 tidak pernah resolve untuk AWS SPA).
@@ -1399,7 +1402,7 @@ async function pollUntilConnected(config, deviceData, email) {
 // ============================================================
 // BATCH
 // ============================================================
-async function processAccount(config, account, currentProxy = null) {
+async function processAccount(config, account, currentProxy = null, fingerprint = null) {
   const method = (account.method || "google").toLowerCase();
   const label = account.email || `account-${Date.now()}`;
   console.log(`\n${"=".repeat(60)}`);
@@ -1425,7 +1428,7 @@ async function processAccount(config, account, currentProxy = null) {
         "Method 'email' butuh config IMAP (user + password). Isi block 'imap' di config.json atau --imap-user/--imap-password."
       );
     }
-    const result = await automateKiroEmailLogin(config, deviceData, account, currentProxy);
+    const result = await automateKiroEmailLogin(config, deviceData, account, currentProxy, fingerprint);
     resolvedEmail = result.email || account.email || label;
   } else {
     throw new Error(`Method tidak dikenal: ${method} (pakai 'google' atau 'email')`);
@@ -1479,8 +1482,14 @@ async function runBatch(config, accounts, delay = 5000) {
       continue;
     }
     const currentProxy = getProxyForAccount(proxies, i);
+    // Generate unique fingerprint per akun — bypass per-fingerprint rate
+    // limit yang gak ke-fix dengan proxy rotation. Pakai index + email hash
+    // sebagai seed supaya deterministic dalam satu run (debugging) tapi beda
+    // antar akun.
+    const fpSeed = (i + 1) * 2654435761 + (accEmail ? accEmail.split("").reduce((a, c) => a + c.charCodeAt(0), 0) : 0);
+    const fp = generateFingerprint(fpSeed);
     try {
-      await processAccount(config, accounts[i], currentProxy);
+      await processAccount(config, accounts[i], currentProxy, fp);
       // Increment quota hanya kalau account berhasil (registered).
       // Kalau AWS balas ERR-837 atau timeout, jangan burn quota — kita
       // bisa coba lagi besok / dengan domain lain.
