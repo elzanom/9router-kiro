@@ -2,6 +2,7 @@ node_modules/
 config.json
 batch-accounts.json
 batch-accounts-resume.json
+batch-emails.json
 run-resume.sh
 aliases.txt
 *.log
