@@ -12,5 +12,9 @@
     "password": "REPLACE_WITH_GMAIL_APP_PASSWORD",
     "tls": true,
     "deleteAfterRead": true
+  },
+  "quota": {
+    "perDomainPerDay": 10
   }
 }
+

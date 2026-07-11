@@ -30,6 +30,7 @@ const { resolveAuthHeaders } = require("./auth");
 const { request } = require("./http-client");
 const { getOtpViaImap } = require("./imap-otp");
 const { loadProxies, getProxyForAccount, chromiumArgsForProxy } = require("./proxy");
+const { domainOf, tryConsume, loadStats, saveStats, pruneOld, utcDateKey } = require("./quota");
 
 // ============================================================
 // 9ROUTER API
@@ -1454,17 +1455,48 @@ async function runBatch(config, accounts, delay = 5000) {
   if (proxies.length > 0) {
     console.log(`[batch] Proxy pool: ${proxies.length} entries (cycle per akun)`);
   }
+  // Quota tracker — per-UTC-day per-domain counter. Skip akun kalau domain
+  // sudah cap hari ini (default 10/hari, override via config.quota.perDomainPerDay).
+  // Persisted di .batch-stats.json (gitignored).
+  const statsFile = config.statsFile || ".batch-stats.json";
+  const cap = (config.quota && config.quota.perDomainPerDay) || 10;
+  // Pre-prune supaya file tidak membengkak (simpan 30 hari terakhir).
+  saveStats(statsFile, pruneOld(loadStats(statsFile), 30));
+  console.log(`[batch] Quota: ${cap} per domain per UTC day (stats: ${statsFile})`);
   let success = 0;
+  let skipped = 0;
   let failed = 0;
 
   for (let i = 0; i < accounts.length; i++) {
+    const accEmail = accounts[i].email || accounts[i].name || "";
+    const domain = domainOf(accEmail);
+    const todayKey = utcDateKey();
+    const currentStats = loadStats(statsFile);
+    const used = (currentStats[todayKey] && currentStats[todayKey][domain]) || 0;
+    if (domain && used >= cap) {
+      console.log(`[${accEmail}] ⏭️  Skip: domain ${domain} sudah ${used}/${cap} hari ini (UTC)`);
+      skipped++;
+      continue;
+    }
     const currentProxy = getProxyForAccount(proxies, i);
     try {
       await processAccount(config, accounts[i], currentProxy);
-      success++;
+      // Increment quota hanya kalau account berhasil (registered).
+      // Kalau AWS balas ERR-837 atau timeout, jangan burn quota — kita
+      // bisa coba lagi besok / dengan domain lain.
+      const r = tryConsume(statsFile, accEmail, cap);
+      if (r.allowed) {
+        success++;
+      } else {
+        // Race condition: domain baru saja ke-cap oleh concurrent process.
+        console.log(`[${accEmail}] ⚠️  Registered tapi domain ${domain} sudah cap di menit ini (race).`);
+        success++;
+      }
     } catch (err) {
       console.error(`❌ Gagal: ${err.message}`);
       failed++;
+      // Increment quota tetap TIDAK dilakukan untuk failure — supaya besok
+      // domain yang sama masih punya slot tersisa untuk retry.
     }
 
     if (i < accounts.length - 1) {
@@ -1477,7 +1509,7 @@ async function runBatch(config, accounts, delay = 5000) {
   }
 
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`SELESAI: ${success} sukses, ${failed} gagal dari ${accounts.length} akun`);
+  console.log(`SELESAI: ${success} sukses, ${failed} gagal, ${skipped} skipped dari ${accounts.length} akun`);
 }
 
 // ============================================================

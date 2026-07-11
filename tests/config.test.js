@@ -100,3 +100,10 @@ test("imap: env user menang (tanpa flag user)", async () => {
     delete process.env.NINEROUTER_IMAP_USER;
   }
 });
+
+test("quota: default 10 perDomainPerDay", async () => {
+  const cfg = await loadConfig([], { interactive: false });
+  assert.equal(cfg.quota.perDomainPerDay, 10);
+  assert.equal(cfg.statsFile, ".batch-stats.json");
+  assert.equal(cfg.proxyFile, "proxies.txt");
+});

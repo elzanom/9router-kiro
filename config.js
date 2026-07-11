@@ -119,6 +119,15 @@ async function loadConfig(argv = process.argv.slice(2), { interactive = process.
     deleteAfterRead: noDelete ? false : fileDelete !== undefined ? Boolean(fileDelete) : true,
   };
 
+  // Quota tracker — per-UTC-day per-domain counter. Skip akun kalau domain
+  // sudah cap (default 10/hari). Persisted di .batch-stats.json.
+  const quotaFile = file.quota || {};
+  cfg.quota = {
+    perDomainPerDay: Number(quotaFile.perDomainPerDay) || 10,
+  };
+  cfg.statsFile = pick("stats-file", "NINEROUTER_STATS_FILE") || ".batch-stats.json";
+  cfg.proxyFile = pick("proxy-file", "NINEROUTER_PROXY_FILE") || "proxies.txt";
+
   cfg.mode = resolveMode(cfg.mode, cfg);
 
   if (cfg.mode === "remote" && cfg.proto === "http" && !isLocalHost(cfg.host)) {
